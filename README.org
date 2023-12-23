@@ -1,7 +1,7 @@
 * Zig-emacs
 Zig binding for Emacs's [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Writing-Dynamic-Modules.html][dynamic modules]].
 
-* Usage
+* Example
 #+begin_src zig
 const std = @import("std");
 const emacs = @import("emacs");
@@ -52,5 +52,10 @@ Compile [[file:example.zig][this example]] with ~zig build~, then load it into e
 If everything is OK, you should see our greeting message in minibuffer.
 
 [[file:screenshot.jpg]]
+
+* Usage
+=zig-emacs= support [[https://ziglang.org/download/0.11.0/release-notes.html#Package-Management][package manager]] introduced in Zig 0.11.
+
+
 * License
 [[./LICENSE][MIT]]
