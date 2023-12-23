@@ -1,23 +1,26 @@
 const std = @import("std");
 const emacs = @import("emacs");
-pub usingnamespace emacs;
+usingnamespace emacs;
 
-pub fn init(env: emacs.Env) void {
-    env.define_fn(
-        "test-func",
+// Emacs dynamic module entrypoint
+pub fn init(env: emacs.Env) c_int {
+    _ = env.define_fn(
+        "zig-func",
         struct {
             fn f(e: emacs.Env) emacs.Value {
-                const name = "hello emacs from zig";
-                var args = [_]emacs.Value{
-                    e.make_string(e.inner, name.ptr, @intCast(name.len)),
-                };
-                return e.funcall(
-                    e.inner,
-                    e.intern(e.inner, "message"),
-                    1,
-                    &args,
-                );
+                return e.message("hello emacs from zig");
             }
         }.f,
     );
+
+    _ = env.define_fn(
+        "zig-add",
+        struct {
+            fn f(e: emacs.Env, a: i32, b: i32) emacs.Value {
+                return e.make_integer(a + b);
+            }
+        }.f,
+    );
+
+    return 0;
 }
