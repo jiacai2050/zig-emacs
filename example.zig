@@ -3,12 +3,21 @@ const emacs = @import("emacs");
 pub usingnamespace emacs;
 
 pub fn init(env: emacs.Env) void {
-    env.define_fn("test-func", "haha");
-    std.debug.print("{s}\n", .{"hello emacs"});
-}
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+    env.define_fn(
+        "test-func",
+        struct {
+            fn f(e: emacs.Env) emacs.Value {
+                const name = "hello emacs from zig";
+                var args = [_]emacs.Value{
+                    e.make_string(e.inner, name.ptr, @intCast(name.len)),
+                };
+                return e.funcall(
+                    e.inner,
+                    e.intern(e.inner, "message"),
+                    1,
+                    &args,
+                );
+            }
+        }.f,
+    );
 }
