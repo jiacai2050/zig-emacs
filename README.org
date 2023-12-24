@@ -1,8 +1,7 @@
 #+TITLE: Zig-emacs
 #+DATE: 2023-12-24T12:27:53+0800
-#+LASTMOD: 2023-12-24T12:29:59+0800
+#+LASTMOD: 2023-12-24T12:45:15+0800
 #+OPTIONS: toc:nil num:nil
-#+STARTUP: content
 
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml/badge.svg]]
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/lisp-ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/lisp-ci.yml/badge.svg]]
@@ -56,9 +55,10 @@ pub fn init(env: emacs.Env) c_int {
     return 0;
 }
 #+end_src
-Compile [[file:example.zig][this example]] with ~zig build~, then load it into emacs.
+Compile [[file:example.zig][this example]] with ~zig build~, then load it into Emacs.
 #+BEGIN_SRC emacs-lisp
-(module-load (expand-file-name "zig-out/lib/libexample.dylib"))
+
+(module-load (expand-file-name "zig-out/lib/libzig-example.dylib"))
 (zig-greeting "Jiacai")
 #+END_SRC
 If everything is OK, you should see our greeting message in minibuffer.
@@ -67,7 +67,6 @@ If everything is OK, you should see our greeting message in minibuffer.
 
 * Usage
 =zig-emacs= support [[https://ziglang.org/download/0.11.0/release-notes.html#Package-Management][package manager]] introduced in Zig 0.11.
-
 
 * License
 [[./LICENSE][MIT]]

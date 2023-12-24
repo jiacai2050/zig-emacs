@@ -108,10 +108,6 @@ pub const Env = struct {
         );
     }
 
-    pub fn message(self: Env, input: [:0]const u8) Value {
-        return self.funcall("message", &[_]Value{self.makeString(input)});
-    }
-
     pub fn shouldQuit(self: Env) bool {
         return self.inner.should_quit.?(self.inner) or self.nonLocalExitCheck() != .@"return" or self.processInput() != .@"continue";
     }
@@ -142,7 +138,7 @@ pub const Env = struct {
     }
 
     /// This function define a module function.
-    pub fn defineFunc(
+    pub fn makeFunction(
         self: Env,
         comptime name: [:0]const u8,
         func: anytype,
@@ -171,11 +167,10 @@ pub const Env = struct {
             @compileError("emacs function should return Value or !Value");
         }
 
-        const makeFunction = self.inner.make_function.?;
         // subtract the env argument
         const min_args: ptrdiff_t = @as(ptrdiff_t, @intCast(fn_info.params.len)) - 1;
         const max_args = min_args; // TODO: now we only support fixed number of args.
-        const emacs_fn = makeFunction(
+        const emacs_fn = self.inner.make_function.?(
             self.inner,
             min_args,
             max_args,
@@ -237,6 +232,27 @@ pub const Env = struct {
         return;
     }
 
+    pub fn makeUserPointer(self: Env, user_ptr: *anyopaque, fin: anytype) Value {
+        return self.inner.make_user_ptr.?(
+            self.inner,
+            struct {
+                fn finalizer(ptr: ?*anyopaque) callconv(.C) void {
+                    if (ptr) |p| {
+                        @call(.auto, fin, .{p});
+                    }
+                }
+            }.finalizer,
+            user_ptr,
+        );
+    }
+    pub fn getUserPointer(self: Env, v: Value) ?*anyopaque {
+        return self.inner.get_user_ptr.?(self.inner, v);
+    }
+
+    pub fn message(self: Env, input: [:0]const u8) Value {
+        return self.funcall("message", &[_]Value{self.makeString(input)});
+    }
+
     pub fn signal(self: Env, err: anyerror, args: anytype) void {
         const ArgsType = @TypeOf(args);
         const args_type_info = @typeInfo(ArgsType);
@@ -267,8 +283,28 @@ fn convertTypeFromEmacs(allocator: std.mem.Allocator, comptime ArgType: type, en
                 u8 => arg.* = try env.extractString(allocator, v),
                 else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
             },
+            .One => arg.* = blk: {
+                break :blk @ptrCast(@alignCast(env.getUserPointer(v)));
+                // TODO: handle null?
+                // break :blk if (env.getUserPointer(v)) |p|
+                //     @ptrCast(@alignCast(env.getUserPointer(p)))
+                // else
+                //     null;
+            },
             else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
         },
         else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
     }
 }
+
+// TODO: How to encapuslate a user pointer?
+// pub const UserPointer =  struct {
+//     ptr: *anyopaque,
+//     finalizer: ?*const fn (ptr: *anyopaque) void = null,
+
+//     fn deinit(self: UserPointer) void {
+//         if (self.finalizer) |fin| {
+//             @call(.auto, fin, .{self.ptr});
+//         }
+//     }
+// };
