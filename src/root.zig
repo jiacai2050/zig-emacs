@@ -10,15 +10,32 @@ export fn emacs_module_init(ert: ?*c.struct_emacs_runtime) callconv(.C) c_int {
     if (!@hasDecl(root, "init")) @compileError("emacs dynamic module must provider function `init`");
     if (!@hasDecl(root, "allocator")) @compileError("emacs dynamic module must provide an allocator");
 
-    return root.init(Env.init(
+    const env = Env.init(
         ert.?.get_environment.?(ert).?,
         root.allocator,
-    ));
+    );
+    return root.init(env);
 }
 
 pub const Value = c.emacs_value;
 const ptrdiff_t = c_long;
 const intmax_t = c_long;
+
+pub const FuncContext = struct {
+    doc_string: ?[:0]const u8 = null,
+    interactive_spec: ?[:0]const u8 = null,
+};
+
+pub const FuncCallExit = enum(u32) {
+    @"return",
+    signal,
+    throw,
+};
+
+pub const ProcessInputResult = enum(u32) {
+    @"continue",
+    quit,
+};
 
 pub const Env = struct {
     inner: *c.emacs_env,
@@ -95,12 +112,42 @@ pub const Env = struct {
         return self.funcall("message", &[_]Value{self.makeString(input)});
     }
 
+    pub fn shouldQuit(self: Env) bool {
+        return self.inner.should_quit.?(self.inner) or self.nonLocalExitCheck() != .@"return" or self.processInput() != .@"continue";
+    }
+
+    pub fn nonLocalExitCheck(self: Env) FuncCallExit {
+        return @enumFromInt(self.inner.non_local_exit_check.?(self.inner));
+    }
+
+    /// This function clears the pending nonlocal exit conditions and data from env.
+    pub fn nonLocalExitClear(self: Env) void {
+        return self.inner.non_local_exit_clear.?(self.inner);
+    }
+
+    pub fn nonLocalExitThrow(self: Env, tag: Value, value: Value) void {
+        return self.inner.non_local_exit_throw.?(self.inner, tag, value);
+    }
+
+    pub fn nonLocalExitSignal(self: Env, symbol: Value, value: Value) void {
+        return self.inner.non_local_exit_signal.?(self.inner, symbol, value);
+    }
+
+    pub fn processInput(self: Env) ProcessInputResult {
+        return @enumFromInt(self.inner.process_input.?(self.inner));
+    }
+
+    pub fn typeOf(self: Env, v: Value) Value {
+        return self.inner.type_of.?(self.inner, v);
+    }
+
+    /// This function define a module function.
     pub fn defineFunc(
         self: Env,
         comptime name: [:0]const u8,
         func: anytype,
         ctx: FuncContext,
-    ) Value {
+    ) void {
         const fn_info = switch (@typeInfo(@TypeOf(func))) {
             .Fn => |fn_info| fn_info,
             else => @compileError("cannot use func, expecting a function"),
@@ -149,11 +196,18 @@ pub const Env = struct {
 
                         convertTypeFromEmacs(zig_env.allocator, ArgType, zig_env, arg_ptr, emacs_args[i].?) catch |err| {
                             std.log.err("convert value failed, func:{s}, err:{any}", .{ name, err });
-                            return zig_env.report_error(
-                                std.fmt.comptimePrint("convert value to zig failed, func:{s}", .{name}),
-                                err,
-                            );
+                            zig_env.signal(err, .{
+                                zig_env.makeString("convert emacs value to zig failed"),
+                                zig_env.makeString(name),
+                                zig_env.makeInteger(i + 1),
+                                zig_env.makeString(@typeName(ArgType)),
+                            });
+                            return zig_env.nil;
                         };
+                    }
+
+                    if (zig_env.shouldQuit()) {
+                        return zig_env.nil;
                     }
 
                     return if (fn_info.return_type.? == Value)
@@ -161,10 +215,11 @@ pub const Env = struct {
                     else
                         @call(.auto, func, args) catch |err| {
                             std.log.err("call function failed, func:{s}, err:{any}", .{ name, err });
-                            return zig_env.report_error(
-                                std.fmt.comptimePrint("call function failed, func:{s}", .{name}),
-                                err,
-                            );
+                            zig_env.signal(err, .{
+                                zig_env.makeString("call function failed"),
+                                zig_env.makeString(name),
+                            });
+                            return zig_env.nil;
                         };
                 }
             }.emacs_fn,
@@ -172,12 +227,32 @@ pub const Env = struct {
             null,
         );
 
-        return self.funcall("defalias", &[_]Value{
+        if (ctx.interactive_spec) |spec| {
+            self.inner.make_interactive.?(self.inner, emacs_fn, self.makeString(spec));
+        }
+        _ = self.funcall("defalias", &[_]Value{
             self.intern(name), emacs_fn,
         });
+
+        return;
     }
 
-    pub fn report_error(self: Env, comptime tmpl: [:0]const u8, err: anyerror) Value {
+    pub fn signal(self: Env, err: anyerror, args: anytype) void {
+        const ArgsType = @TypeOf(args);
+        const args_type_info = @typeInfo(ArgsType);
+        if (args_type_info != .Struct) {
+            @compileError("expected tuple or struct argument, found " ++ @typeName(ArgsType));
+        }
+
+        var data: [args_type_info.Struct.fields.len]Value = undefined;
+        inline for (args_type_info.Struct.fields, 0..) |fld, i| {
+            data[i] = @field(args, fld.name);
+        }
+        const symbol = self.funcall("make-symbol", &[_]Value{self.makeString(@errorName(err))});
+        self.nonLocalExitSignal(symbol, self.funcall("list", &data));
+    }
+
+    pub fn reportError(self: Env, comptime tmpl: [:0]const u8, err: anyerror) Value {
         return self.funcall("error", &[_]Value{ self.makeString(tmpl ++ "err:%s"), self.makeString(@errorName(err)) });
     }
 };
@@ -187,7 +262,6 @@ fn convertTypeFromEmacs(allocator: std.mem.Allocator, comptime ArgType: type, en
     switch (@typeInfo(ArgType)) {
         .Float => arg.* = env.extractFloat(v),
         .Int => arg.* = @intCast(env.extractInteger(v)),
-
         .Pointer => |ptr| switch (ptr.size) {
             .Slice => switch (ptr.child) {
                 u8 => arg.* = try env.extractString(allocator, v),
@@ -198,7 +272,3 @@ fn convertTypeFromEmacs(allocator: std.mem.Allocator, comptime ArgType: type, en
         else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
     }
 }
-
-pub const FuncContext = struct {
-    doc_string: ?[:0]const u8 = null,
-};

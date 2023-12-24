@@ -2,37 +2,42 @@ const std = @import("std");
 const emacs = @import("emacs");
 usingnamespace emacs;
 
+// This is required by emacs zig module.
 pub const allocator = std.heap.c_allocator;
+
+fn greeting(e: emacs.Env, username: []const u8) !emacs.Value {
+    // `[]const u8` is allcated by emacs zig module, we need to ensure
+    // is freed.
+    defer allocator.free(username);
+
+    const msg = try std.fmt.allocPrintZ(
+        allocator,
+        "hello {s}!",
+        .{username},
+    );
+    defer allocator.free(msg);
+
+    _ = e.message(msg);
+    return e.makeString(msg);
+}
+
+fn add(e: emacs.Env, a: i32, b: i32) emacs.Value {
+    return e.makeInteger(a + b);
+}
 
 // Emacs dynamic module entrypoint
 pub fn init(env: emacs.Env) c_int {
-    _ = env.defineFunc(
+    env.defineFunc(
         "zig-greeting",
-        struct {
-            fn f(e: emacs.Env, username: []const u8) !emacs.Value {
-                defer allocator.free(username);
-
-                const greeting = try std.fmt.allocPrintZ(
-                    allocator,
-                    "hello {s}!",
-                    .{username},
-                );
-                defer allocator.free(greeting);
-
-                return e.message(greeting);
-            }
-        }.f,
-        .{ .doc_string = "greet written in Zig" },
+        greeting,
+        .{ .doc_string = "greeting written in Zig" },
     );
 
-    _ = env.defineFunc(
+    env.defineFunc(
         "zig-add",
-        struct {
-            fn f(e: emacs.Env, a: i32, b: i32) emacs.Value {
-                return e.makeInteger(a + b);
-            }
-        }.f,
-        .{},
+        add,
+        // This make `zig-add` interactive.
+        .{ .interactive_spec = "nFirst number: \nnSecond number: " },
     );
 
     return 0;

@@ -1,0 +1,32 @@
+name: ELisp CI
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - '**.md'
+      - '**.org'
+
+jobs:
+  lisp-test:
+    timeout-minutes: 10
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        emacs_version:
+          - 28.2
+          - 29.1
+          - snapshot
+    steps:
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs_version }}
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: master
+      - uses: actions/checkout@v4
+      - name: Run test
+        run: |
+          make test

@@ -8,12 +8,13 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addSharedLibrary(.{
-        .name = "example",
+        .name = "zig-example",
         .root_source_file = .{ .path = "example.zig" },
         .target = target,
         .optimize = optimize,
     });
     exe.addIncludePath(.{ .path = "include" });
     exe.addModule("emacs", module);
+    exe.linkLibC();
     b.installArtifact(exe);
 }
