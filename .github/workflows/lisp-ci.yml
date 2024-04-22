@@ -2,10 +2,16 @@ name: ELisp CI
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '10 20 * * *'
+  pull_request:
+    paths:
+      - '**.zig'
+      - '**.yml'
   push:
-    paths-ignore:
-      - '**.md'
-      - '**.org'
+    paths:
+      - '**.zig'
+      - '**.yml'
 
 jobs:
   lisp-test:

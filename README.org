@@ -1,6 +1,6 @@
 #+TITLE: Zig-emacs
 #+DATE: 2023-12-24T12:27:53+0800
-#+LASTMOD: 2023-12-24T12:45:15+0800
+#+LASTMOD: 2024-04-23T07:58:58+0800
 #+OPTIONS: toc:nil num:nil
 
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml/badge.svg]]
@@ -8,6 +8,7 @@
 
 Zig binding for Emacs's [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Writing-Dynamic-Modules.html][dynamic modules]].
 
+=zig-emacs= only support [[https://ziglang.org/download/][Zig master]], any contribution is welcome. ⚒️
 * Example
 #+begin_src zig
 const std = @import("std");
@@ -68,5 +69,10 @@ If everything is OK, you should see our greeting message in minibuffer.
 * Usage
 =zig-emacs= support [[https://ziglang.org/download/0.11.0/release-notes.html#Package-Management][package manager]] introduced in Zig 0.11.
 
+#+begin_src bash
+zig fetch --save=emacs https://github.com/jiacai2050/zig-emacs/archive/${COMMIT}.tar.gz
+#+end_src
+
+Replace ~${COMMIT}~ with a real one.
 * License
 [[./LICENSE][MIT]]
