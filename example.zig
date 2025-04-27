@@ -1,13 +1,27 @@
 const std = @import("std");
 const emacs = @import("emacs");
-usingnamespace emacs;
 
-// This is required by emacs zig module.
-pub const allocator = std.heap.c_allocator;
+// Every module needs to call `module_init` in order to register with Emacs.
+comptime {
+    emacs.module_init();
+}
 
-fn greeting(e: emacs.Env, username: []const u8) !emacs.Value {
-    // `[]const u8` is allcated by emacs zig module, we need to ensure
-    // is freed.
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+var is_debug = true;
+
+// `zig-emacs` require an `allocator`.
+pub const allocator = gpa: {
+    break :gpa switch (@import("builtin").mode) {
+        .Debug, .ReleaseSafe => debug_allocator.allocator(),
+        .ReleaseFast, .ReleaseSmall => {
+            is_debug = false;
+            break :gpa std.heap.smp_allocator;
+        },
+    };
+};
+
+fn greeting(e: emacs.Env, value: emacs.Value) !emacs.Value {
+    const username = try e.extractString(allocator, value);
     defer allocator.free(username);
 
     const msg = try std.fmt.allocPrintZ(
@@ -21,7 +35,9 @@ fn greeting(e: emacs.Env, username: []const u8) !emacs.Value {
     return e.makeString(msg);
 }
 
-fn add(e: emacs.Env, a: i32, b: i32) emacs.Value {
+fn add(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
+    const a = e.extractInteger(v1);
+    const b = e.extractInteger(v2);
     return e.makeInteger(a + b);
 }
 
@@ -42,13 +58,16 @@ const Database = struct {
     }
 };
 
-fn make_db(e: emacs.Env, id: c_long) !emacs.Value {
+fn make_db(e: emacs.Env, value: emacs.Value) !emacs.Value {
+    const id = e.extractInteger(value);
     var db = try allocator.create(Database);
     db.id = id;
     return e.makeUserPointer(db, Database.finalizer);
 }
 
-fn save_text_to_db(e: emacs.Env, db: *Database, body: c_long) emacs.Value {
+fn save_text_to_db(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
+    const db: *Database = @alignCast(@ptrCast(e.getUserPointer(v1)));
+    const body = e.extractInteger(v2);
     std.debug.print("Save {d} to db({d})\n", .{ body, db.id });
     return e.t;
 }
@@ -80,5 +99,12 @@ pub fn init(env: emacs.Env) c_int {
         save_text_to_db,
         .{},
     );
+
+    if (is_debug) {
+        // TODO: Trace/BPT trap: 5
+        // if (debug_allocator.deinit() != .ok) {
+        //     @panic("mem leaked!");
+        // }
+    }
     return 0;
 }
