@@ -145,7 +145,7 @@ pub const Env = struct {
         ctx: FuncContext,
     ) void {
         const fn_info = switch (@typeInfo(@TypeOf(func))) {
-            .Fn => |fn_info| fn_info,
+            .@"fn" => |fn_info| fn_info,
             else => @compileError("cannot use func, expecting a function"),
         };
         if (fn_info.is_generic) @compileError("emacs function can't be generic");
@@ -155,7 +155,7 @@ pub const Env = struct {
         if (fn_info.return_type) |ret_type| {
             if (ret_type != Value) {
                 switch (@typeInfo(ret_type)) {
-                    .ErrorUnion => |err_union| {
+                    .error_union => |err_union| {
                         if (err_union.payload != Value) {
                             @compileError("emacs function should return Value or !Value");
                         }
@@ -256,12 +256,12 @@ pub const Env = struct {
     pub fn signal(self: Env, err: anyerror, args: anytype) void {
         const ArgsType = @TypeOf(args);
         const args_type_info = @typeInfo(ArgsType);
-        if (args_type_info != .Struct) {
+        if (args_type_info != .@"struct") {
             @compileError("expected tuple or struct argument, found " ++ @typeName(ArgsType));
         }
 
-        var data: [args_type_info.Struct.fields.len]Value = undefined;
-        inline for (args_type_info.Struct.fields, 0..) |fld, i| {
+        var data: [args_type_info.@"struct".fields.len]Value = undefined;
+        inline for (args_type_info.@"struct".fields, 0..) |fld, i| {
             data[i] = @field(args, fld.name);
         }
         const symbol = self.funcall("make-symbol", &[_]Value{self.makeString(@errorName(err))});
@@ -276,14 +276,14 @@ pub const Env = struct {
 /// This function convert Emacs type arg to Zig type.
 fn convertTypeFromEmacs(allocator: std.mem.Allocator, comptime ArgType: type, env: Env, arg: *ArgType, v: Value) !void {
     switch (@typeInfo(ArgType)) {
-        .Float => arg.* = env.extractFloat(v),
-        .Int => arg.* = @intCast(env.extractInteger(v)),
-        .Pointer => |ptr| switch (ptr.size) {
-            .Slice => switch (ptr.child) {
+        .float => arg.* = env.extractFloat(v),
+        .int => arg.* = @intCast(env.extractInteger(v)),
+        .pointer => |ptr| switch (ptr.size) {
+            .slice => switch (ptr.child) {
                 u8 => arg.* = try env.extractString(allocator, v),
                 else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
             },
-            .One => arg.* = blk: {
+            .one => arg.* = blk: {
                 break :blk @ptrCast(@alignCast(env.getUserPointer(v)));
                 // TODO: handle null?
                 // break :blk if (env.getUserPointer(v)) |p|

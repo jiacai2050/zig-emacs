@@ -1,9 +1,7 @@
 .{
-    .name = "zig-emacs",
+    .name = .emacs,
     .version = "0.1.0",
-
-    .dependencies = .{},
-
+    .fingerprint = 0x9075990b8b538df8,
     .paths = .{
         "src",
         "build.zig",

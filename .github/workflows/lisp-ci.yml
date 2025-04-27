@@ -23,15 +23,16 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         emacs_version:
           - 28.2
-          - 29.1
+          - 29.4
+          - 30.1
           - snapshot
     steps:
       - uses: purcell/setup-emacs@master
         with:
           version: ${{ matrix.emacs_version }}
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: mlugg/setup-zig@v1
         with:
-          version: master
+          version: 0.14.0
       - uses: actions/checkout@v4
       - name: Run test
         run: |
