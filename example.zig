@@ -58,14 +58,14 @@ const Database = struct {
     }
 };
 
-fn make_db(e: emacs.Env, value: emacs.Value) !emacs.Value {
+fn makeDB(e: emacs.Env, value: emacs.Value) !emacs.Value {
     const id = e.extractInteger(value);
     var db = try allocator.create(Database);
     db.id = id;
     return e.makeUserPointer(db, Database.finalizer);
 }
 
-fn save_text_to_db(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
+fn saveTextToDB(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
     const db: *Database = @alignCast(@ptrCast(e.getUserPointer(v1)));
     const body = e.extractInteger(v2);
     std.debug.print("Save {d} to db({d})\n", .{ body, db.id });
@@ -89,22 +89,19 @@ pub fn init(env: emacs.Env) c_int {
         .{ .interactive_spec = "nFirst number: \nnSecond number: " },
     );
 
-    env.makeFunction(
-        "make-db",
-        make_db,
-        .{},
-    );
-    env.makeFunction(
-        "save-text-to-db",
-        save_text_to_db,
-        .{},
-    );
+    env.makeFunction("make-db", makeDB, .{});
+    env.makeFunction("save-text-to-db", saveTextToDB, .{});
+    env.makeFunction("zig-deinit", deinit, .{});
 
-    if (is_debug) {
-        // TODO: Trace/BPT trap: 5
-        // if (debug_allocator.deinit() != .ok) {
-        //     @panic("mem leaked!");
-        // }
-    }
     return 0;
+}
+
+fn deinit(env: emacs.Env) emacs.Value {
+    if (is_debug) {
+        if (debug_allocator.deinit() != .ok) {
+            @panic("mem leaked!");
+        }
+    }
+
+    return env.nil;
 }
