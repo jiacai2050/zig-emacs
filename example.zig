@@ -3,13 +3,12 @@ const emacs = @import("emacs");
 
 // Every module needs to call `module_init` in order to register with Emacs.
 comptime {
-    emacs.module_init();
+    emacs.module_init(@This());
 }
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 var is_debug = true;
 
-// `zig-emacs` require an `allocator`.
 pub const allocator = gpa: {
     break :gpa switch (@import("builtin").mode) {
         .Debug, .ReleaseSafe => debug_allocator.allocator(),

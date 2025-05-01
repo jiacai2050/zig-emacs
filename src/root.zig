@@ -2,26 +2,26 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("emacs-module.h");
 });
-const root = @import("root");
 
-pub fn module_init() void {
+const plugin_is_GPL_compatible: c_int = 1;
+
+pub fn module_init(comptime Module: type) void {
     // Those exported variable and func are required by emacs. See:
     // https://www.gnu.org/software/emacs/manual/html_node/elisp/Module-Initialization.html
     @export(&plugin_is_GPL_compatible, .{ .name = "plugin_is_GPL_compatible" });
-    @export(&emacs_module_init, .{ .name = "emacs_module_init" });
+
+    const Closure = struct {
+        fn init(ert: ?*c.struct_emacs_runtime) callconv(.C) c_int {
+            if (!@hasDecl(Module, "init")) @compileError("emacs dynamic module must provider function `init`");
+            const env = Env.init(ert.?.get_environment.?(ert).?);
+            return Module.init(env);
+        }
+    };
+    @export(&Closure.init, .{ .name = "emacs_module_init" });
 }
 
-const plugin_is_GPL_compatible: c_int = 1;
-fn emacs_module_init(ert: ?*c.struct_emacs_runtime) callconv(.C) c_int {
-    if (!@hasDecl(root, "init")) @compileError("emacs dynamic module must provider function `init`");
-
-    const env = Env.init(ert.?.get_environment.?(ert).?);
-    return root.init(env);
-}
-
+/// Emacs value used as argument or return type.
 pub const Value = c.emacs_value;
-const ptrdiff_t = c_long;
-const intmax_t = c_long;
 
 pub const FuncContext = struct {
     doc_string: ?[:0]const u8 = null,
@@ -38,6 +38,9 @@ pub const ProcessInputResult = enum(u32) {
     @"continue",
     quit,
 };
+
+const ptrdiff_t = c_long;
+const intmax_t = c_long;
 
 pub const Env = struct {
     inner: *c.emacs_env,

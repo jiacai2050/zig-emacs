@@ -1,6 +1,6 @@
 #+TITLE: Zig-emacs
 #+DATE: 2023-12-24T12:27:53+0800
-#+LASTMOD: 2025-04-27T20:46:35+0800
+#+LASTMOD: 2025-05-01T10:26:29+0800
 #+OPTIONS: toc:nil num:nil
 
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml/badge.svg]]
@@ -13,39 +13,20 @@ Zig binding for Emacs's [[https://www.gnu.org/software/emacs/manual/html_node/el
 #+begin_src zig
 const std = @import("std");
 const emacs = @import("emacs");
-usingnamespace emacs;
 
-// This is required by emacs zig module.
-pub const allocator = std.heap.c_allocator;
-
-fn greeting(e: emacs.Env, username: []const u8) !emacs.Value {
-    // `[]const u8` is allcated by emacs zig module, we need to ensure
-    // is freed.
-    defer allocator.free(username);
-
-    const msg = try std.fmt.allocPrintZ(
-        allocator,
-        "hello {s}!",
-        .{username},
-    );
-    defer allocator.free(msg);
-
-    _ = e.message(msg);
-    return e.makeString(msg);
+// Every module needs to call `module_init` in order to register with Emacs.
+comptime {
+    emacs.module_init(@This());
 }
 
-fn add(e: emacs.Env, a: i32, b: i32) emacs.Value {
+fn add(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
+    const a = e.extractInteger(v1);
+    const b = e.extractInteger(v2);
     return e.makeInteger(a + b);
 }
 
 // Emacs dynamic module entrypoint
 pub fn init(env: emacs.Env) c_int {
-    env.defineFunc(
-        "zig-greeting",
-        greeting,
-        .{ .doc_string = "greeting written in Zig" },
-    );
-
     env.defineFunc(
         "zig-add",
         add,
