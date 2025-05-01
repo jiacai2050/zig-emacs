@@ -2,24 +2,26 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("emacs-module.h");
 });
-const root = @import("root");
 
-/// This exported variable and func are required by emacs.
-export const plugin_is_GPL_compatible: c_int = 1;
-export fn emacs_module_init(ert: ?*c.struct_emacs_runtime) callconv(.C) c_int {
-    if (!@hasDecl(root, "init")) @compileError("emacs dynamic module must provider function `init`");
-    if (!@hasDecl(root, "allocator")) @compileError("emacs dynamic module must provide an allocator");
+const plugin_is_GPL_compatible: c_int = 1;
 
-    const env = Env.init(
-        ert.?.get_environment.?(ert).?,
-        root.allocator,
-    );
-    return root.init(env);
+pub fn module_init(comptime Module: type) void {
+    // Those exported variable and func are required by emacs. See:
+    // https://www.gnu.org/software/emacs/manual/html_node/elisp/Module-Initialization.html
+    @export(&plugin_is_GPL_compatible, .{ .name = "plugin_is_GPL_compatible" });
+
+    const Closure = struct {
+        fn init(ert: ?*c.struct_emacs_runtime) callconv(.C) c_int {
+            if (!@hasDecl(Module, "init")) @compileError("emacs dynamic module must provider function `init`");
+            const env = Env.init(ert.?.get_environment.?(ert).?);
+            return Module.init(env);
+        }
+    };
+    @export(&Closure.init, .{ .name = "emacs_module_init" });
 }
 
+/// Emacs value used as argument or return type.
 pub const Value = c.emacs_value;
-const ptrdiff_t = c_long;
-const intmax_t = c_long;
 
 pub const FuncContext = struct {
     doc_string: ?[:0]const u8 = null,
@@ -37,18 +39,19 @@ pub const ProcessInputResult = enum(u32) {
     quit,
 };
 
+const ptrdiff_t = c_long;
+const intmax_t = c_long;
+
 pub const Env = struct {
     inner: *c.emacs_env,
-    allocator: std.mem.Allocator,
 
     // global refs
     nil: Value,
     t: Value,
 
-    fn init(env: *c.emacs_env, allocator: std.mem.Allocator) Env {
+    fn init(env: *c.emacs_env) Env {
         return .{
             .inner = env,
-            .allocator = allocator,
             .nil = env.make_global_ref.?(env, env.intern.?(env, "nil")),
             .t = env.make_global_ref.?(env, env.intern.?(env, "t")),
         };
@@ -179,26 +182,13 @@ pub const Env = struct {
                     _ = nargs;
                     _ = data;
 
-                    const zig_env = Env.init(e.?, root.allocator);
+                    const zig_env = Env.init(e.?);
                     var args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
                     args[0] = zig_env;
                     comptime var i: usize = 0;
                     inline while (i < min_args) : (i += 1) {
                         // Remember the first argument is always the env
-                        const arg = fn_info.params[i + 1];
-                        const arg_ptr = &args[i + 1];
-                        const ArgType = arg.type.?;
-
-                        convertTypeFromEmacs(zig_env.allocator, ArgType, zig_env, arg_ptr, emacs_args[i].?) catch |err| {
-                            std.log.err("convert value failed, func:{s}, err:{any}", .{ name, err });
-                            zig_env.signal(err, .{
-                                zig_env.makeString("convert emacs value to zig failed"),
-                                zig_env.makeString(name),
-                                zig_env.makeInteger(i + 1),
-                                zig_env.makeString(@typeName(ArgType)),
-                            });
-                            return zig_env.nil;
-                        };
+                        args[i + 1] = emacs_args[i];
                     }
 
                     if (zig_env.shouldQuit()) {
@@ -274,13 +264,20 @@ pub const Env = struct {
 };
 
 /// This function convert Emacs type arg to Zig type.
-fn convertTypeFromEmacs(allocator: std.mem.Allocator, comptime ArgType: type, env: Env, arg: *ArgType, v: Value) !void {
+/// Not used for now
+fn convertTypeFromEmacs(allocator: ?std.mem.Allocator, comptime ArgType: type, env: Env, arg: *ArgType, v: Value) !void {
     switch (@typeInfo(ArgType)) {
         .float => arg.* = env.extractFloat(v),
         .int => arg.* = @intCast(env.extractInteger(v)),
         .pointer => |ptr| switch (ptr.size) {
             .slice => switch (ptr.child) {
-                u8 => arg.* = try env.extractString(allocator, v),
+                u8 => arg.* = blk: {
+                    if (allocator) |ally| {
+                        break :blk try env.extractString(ally, v);
+                    } else {
+                        return error.MissingAllocator;
+                    }
+                },
                 else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
             },
             .one => arg.* = blk: {
