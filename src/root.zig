@@ -11,7 +11,7 @@ pub fn module_init(comptime Module: type) void {
     @export(&plugin_is_GPL_compatible, .{ .name = "plugin_is_GPL_compatible" });
 
     const Closure = struct {
-        fn init(ert: ?*c.struct_emacs_runtime) callconv(.C) c_int {
+        fn init(ert: ?*c.struct_emacs_runtime) callconv(.c) c_int {
             if (!@hasDecl(Module, "init")) @compileError("emacs dynamic module must provider function `init`");
             const env = Env.init(ert.?.get_environment.?(ert).?);
             return Module.init(env);
@@ -178,7 +178,7 @@ pub const Env = struct {
             min_args,
             max_args,
             struct {
-                fn emacs_fn(e: ?*c.emacs_env, nargs: ptrdiff_t, emacs_args: [*c]Value, data: ?*anyopaque) callconv(.C) Value {
+                fn emacs_fn(e: ?*c.emacs_env, nargs: ptrdiff_t, emacs_args: [*c]Value, data: ?*anyopaque) callconv(.c) Value {
                     _ = nargs;
                     _ = data;
 
@@ -226,7 +226,7 @@ pub const Env = struct {
         return self.inner.make_user_ptr.?(
             self.inner,
             struct {
-                fn finalizer(ptr: ?*anyopaque) callconv(.C) void {
+                fn finalizer(ptr: ?*anyopaque) callconv(.c) void {
                     if (ptr) |p| {
                         @call(.auto, fin, .{p});
                     }

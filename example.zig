@@ -23,10 +23,11 @@ fn greeting(e: emacs.Env, value: emacs.Value) !emacs.Value {
     const username = try e.extractString(allocator, value);
     defer allocator.free(username);
 
-    const msg = try std.fmt.allocPrintZ(
+    const msg = try std.fmt.allocPrintSentinel(
         allocator,
         "hello {s}!",
         .{username},
+        0,
     );
     defer allocator.free(msg);
 
@@ -65,7 +66,7 @@ fn makeDB(e: emacs.Env, value: emacs.Value) !emacs.Value {
 }
 
 fn saveTextToDB(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
-    const db: *Database = @alignCast(@ptrCast(e.getUserPointer(v1)));
+    const db: *Database = @ptrCast(@alignCast(e.getUserPointer(v1)));
     const body = e.extractInteger(v2);
     std.debug.print("Save {d} to db({d})\n", .{ body, db.id });
     return e.t;

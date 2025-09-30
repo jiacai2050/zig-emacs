@@ -1,9 +1,11 @@
 .{
     .name = .emacs,
-    .version = "0.1.0",
+    .version = "0.2.0",
     .fingerprint = 0x9075990b8b538df8,
+    .minimum_zig_version = "0.15.1",
     .paths = .{
         "src",
+        "include",
         "build.zig",
         "build.zig.zon",
     },

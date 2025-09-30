@@ -30,9 +30,7 @@ jobs:
       - uses: purcell/setup-emacs@master
         with:
           version: ${{ matrix.emacs_version }}
-      - uses: mlugg/setup-zig@v1
-        with:
-          version: 0.14.0
+      - uses: mlugg/setup-zig@v2
       - uses: actions/checkout@v4
       - name: Run test
         run: |

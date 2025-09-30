@@ -1,14 +1,18 @@
 #+TITLE: Zig-emacs
 #+DATE: 2023-12-24T12:27:53+0800
-#+LASTMOD: 2025-05-01T10:26:29+0800
+#+LASTMOD: 2025-09-30T21:36:13+0800
 #+OPTIONS: toc:nil num:nil
 
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml/badge.svg]]
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/lisp-ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/lisp-ci.yml/badge.svg]]
+[[https://img.shields.io/badge/zig%20version-0.15.1-blue.svg]]
 
 Zig binding for Emacs's [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Writing-Dynamic-Modules.html][dynamic modules]].
 
-=zig-emacs= only support [[https://ziglang.org/download/][Zig 0.14]], any contribution is welcome. ⚒️
+* Docs
+
+See https://jiacai2050.github.io/zig-emacs/
+
 * Example
 #+begin_src zig
 const std = @import("std");
