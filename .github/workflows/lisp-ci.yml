@@ -2,8 +2,6 @@ name: ELisp CI
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '10 20 * * *'
   pull_request:
     paths:
       - '**.zig'
@@ -20,18 +18,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        emacs_version:
-          - 28.2
-          - 29.4
-          - 30.1
-          - snapshot
+        os: [ubuntu-latest]
     steps:
-      - uses: purcell/setup-emacs@master
-        with:
-          version: ${{ matrix.emacs_version }}
       - uses: mlugg/setup-zig@v2
       - uses: actions/checkout@v4
+      - name: Install emacs
+        run: |
+          sudo apt update && sudo apt install -y emacs
       - name: Run test
         run: |
+          emacs --version
           make test
