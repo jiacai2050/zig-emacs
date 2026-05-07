@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("emacs-module.h");
-});
+const c = @import("c");
 
 const plugin_is_GPL_compatible: c_int = 1;
 

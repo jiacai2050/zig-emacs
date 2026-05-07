@@ -3,13 +3,21 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("include/emacs-module.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const module = b.addModule("emacs", .{
         .root_source_file = b.path("src/root.zig"),
         .optimize = optimize,
         .target = target,
         .link_libc = true,
+        .imports = &.{
+            .{ .name = "c", .module = translate_c.createModule() },
+        },
     });
-    module.addIncludePath(b.path("include"));
 
     const exe = b.addLibrary(.{
         .linkage = .dynamic,

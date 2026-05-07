@@ -1,11 +1,11 @@
 #+TITLE: Zig-emacs
 #+DATE: 2023-12-24T12:27:53+0800
-#+LASTMOD: 2025-09-30T21:36:13+0800
+#+LASTMOD: 2026-05-07T21:24:21+0800
 #+OPTIONS: toc:nil num:nil
 
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml/badge.svg]]
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/lisp-ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/lisp-ci.yml/badge.svg]]
-[[https://img.shields.io/badge/zig%20version-0.15.1-blue.svg]]
+[[https://img.shields.io/badge/zig%20version-0.16.0-blue.svg]]
 
 Zig binding for Emacs's [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Writing-Dynamic-Modules.html][dynamic modules]].
 
@@ -31,7 +31,7 @@ fn add(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
 
 // Emacs dynamic module entrypoint
 pub fn init(env: emacs.Env) c_int {
-    env.defineFunc(
+    env.makeFunction(
         "zig-add",
         add,
         // This make `zig-add` interactive.
@@ -52,12 +52,15 @@ If everything is OK, you should see our greeting message in minibuffer.
 [[file:screenshot.jpg]]
 
 * Usage
-=zig-emacs= support [[https://ziglang.org/download/0.11.0/release-notes.html#Package-Management][package manager]] introduced in Zig 0.11.
+=zig-emacs= support Zig's [[https://ziglang.org/download/0.16.0/release-notes.html][package manager]].
 
 #+begin_src bash
-zig fetch --save=emacs https://github.com/jiacai2050/zig-emacs/archive/${COMMIT}.tar.gz
+# Latest version
+zig fetch --save git+https://github.com/jiacai2050/zig-emacs.git
+
+# Tagged version
+zig fetch --save git+https://github.com/jiacai2050/zig-emacs.git#v0.1.0
 #+end_src
 
-Replace ~${COMMIT}~ with a real one.
 * License
 [[./LICENSE][MIT]]
