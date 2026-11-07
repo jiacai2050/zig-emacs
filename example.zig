@@ -8,24 +8,29 @@ comptime {
 
 var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
 
-pub const allocator = gpa: {
-    break :gpa switch (@import("builtin").mode) {
-        .Debug, .ReleaseSafe => safe_allocator.allocator(),
-        .ReleaseFast, .ReleaseSmall => {
-            break :gpa std.heap.smp_allocator;
-        },
-    };
+const ModuleContext = struct {
+    gpa: std.mem.Allocator,
 };
 
-fn greeting(e: emacs.Env, value: emacs.Value) !emacs.Value {
-    const username = try e.extractString(allocator, value);
-    defer allocator.free(username);
+var module_context = ModuleContext{
+    .gpa = switch (@import("builtin").mode) {
+        .Debug, .ReleaseSafe => safe_allocator.allocator(),
+        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+    },
+};
 
-    const msg = try allocator.printSentinel("hello {s}!", .{username}, 0);
-    defer allocator.free(msg);
+fn greeting(env: emacs.Env, value: emacs.Value) !emacs.Value {
+    const context = env.getUserData(ModuleContext) orelse {
+        return error.MissingModuleContext;
+    };
+    const username = try env.extractString(context.gpa, value);
+    defer context.gpa.free(username);
 
-    _ = e.message(msg);
-    return e.makeString(msg);
+    const msg = try context.gpa.printSentinel("hello {s}!", .{username}, 0);
+    defer context.gpa.free(msg);
+
+    _ = try env.message(msg);
+    return env.makeString(msg);
 }
 
 fn add(env: emacs.Env, first_value: emacs.Value, second_value: emacs.Value) emacs.Value {
@@ -35,20 +40,34 @@ fn add(env: emacs.Env, first_value: emacs.Value, second_value: emacs.Value) emac
 }
 
 const Database = struct {
+    // Identifies stale or incorrectly typed Emacs user pointers.
+    const magic: u64 = 0x4442_5A49_4745_4D41;
+
+    gpa: std.mem.Allocator,
+    // Stores the marker used to validate this Database pointer.
+    magic_value: u64,
     id: emacs.Integer,
-    fn finalizer(ptr: *anyopaque) void {
-        const self: *Database = @ptrCast(@alignCast(ptr));
-        defer allocator.destroy(self);
+
+    fn finalizer(self: *Database) void {
+        if (self.magic_value != magic) {
+            @panic("Invalid database pointer");
+        }
+        defer self.gpa.destroy(self);
 
         std.debug.print("Close db, id:{d}\n", .{self.id});
     }
 };
 
-fn makeDB(e: emacs.Env, value: emacs.Value) !emacs.Value {
-    const id = e.extractInteger(value);
-    var db = try allocator.create(Database);
+fn makeDB(env: emacs.Env, value: emacs.Value) !emacs.Value {
+    const context = env.getUserData(ModuleContext) orelse {
+        return error.MissingModuleContext;
+    };
+    const id = env.extractInteger(value);
+    var db = try context.gpa.create(Database);
+    db.gpa = context.gpa;
+    db.magic_value = Database.magic;
     db.id = id;
-    return e.makeUserPointer(db, Database.finalizer);
+    return env.makeUserPointer(Database, db, Database.finalizer);
 }
 
 fn saveTextToDB(
@@ -56,48 +75,63 @@ fn saveTextToDB(
     database_value: emacs.Value,
     body_value: emacs.Value,
 ) emacs.Value {
-    const user_pointer = env.getUserPointer(database_value) orelse {
-        return env.reportError("invalid database pointer: ", error.InvalidDatabasePointer);
+    const database = env.getUserPointer(Database, database_value) orelse {
+        return env.reportError(
+            "invalid database pointer: ",
+            error.InvalidDatabasePointer,
+        ) catch |err| {
+            std.log.err("failed to report database error: {s}", .{@errorName(err)});
+            return env.nil;
+        };
     };
-    const db: *Database = @ptrCast(@alignCast(user_pointer));
+    if (database.magic_value != Database.magic) {
+        return env.reportError(
+            "invalid database pointer: ",
+            error.InvalidDatabasePointer,
+        ) catch |err| {
+            std.log.err("failed to report database error: {s}", .{@errorName(err)});
+            return env.nil;
+        };
+    }
     const body = env.extractInteger(body_value);
-    std.debug.print("Save {d} to db({d})\n", .{ body, db.id });
+    std.debug.print("Save {d} to db({d})\n", .{ body, database.id });
     return env.t;
 }
 
 // Emacs dynamic module entrypoint
+/// Registers the example module functions with Emacs.
 pub fn init(env: emacs.Env) c_int {
     std.debug.print("Init my module...\n", .{});
 
     env.makeFunction(
         "zig-greeting",
         greeting,
-        .{ .doc_string = "greeting written in Zig" },
-    );
+        .{
+            .doc_string = "greeting written in Zig",
+            .user_data = @ptrCast(&module_context),
+        },
+    ) catch return 1;
 
     env.makeFunction(
         "zig-add",
         add,
         // This make `zig-add` interactive.
-        .{ .interactive_spec = "nFirst number: \nnSecond number: " },
-    );
+        .{
+            .interactive_spec = "nFirst number: \nnSecond number: ",
+            .user_data = @ptrCast(&module_context),
+        },
+    ) catch return 1;
 
-    env.makeFunction("make-db", makeDB, .{});
-    env.makeFunction("save-text-to-db", saveTextToDB, .{});
-    env.makeFunction("zig-deinit", deinit, .{});
+    env.makeFunction(
+        "make-db",
+        makeDB,
+        .{ .user_data = @ptrCast(&module_context) },
+    ) catch return 1;
+    env.makeFunction(
+        "save-text-to-db",
+        saveTextToDB,
+        .{ .user_data = @ptrCast(&module_context) },
+    ) catch return 1;
 
     return 0;
-}
-
-fn deinit(env: emacs.Env) emacs.Value {
-    switch (@import("builtin").mode) {
-        .Debug, .ReleaseSafe => {
-            if (safe_allocator.deinit() != 0) {
-                @panic("Memory leak detected");
-            }
-        },
-        .ReleaseFast, .ReleaseSmall => {},
-    }
-
-    return env.nil;
 }

@@ -3,13 +3,15 @@ name: ELisp CI
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - '**.zig'
-      - '**.yml'
   push:
     paths:
       - '**.zig'
+      - '**.el'
       - '**.yml'
+      - 'Makefile'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'include/**'
 
 jobs:
   lisp-test:

@@ -1,6 +1,6 @@
 #+TITLE: Zig-emacs
 #+DATE: 2023-12-24T12:27:53+0800
-#+LASTMOD: 2026-11-07T23:02:16+0800
+#+LASTMOD: 2026-11-08T00:12:00+0800
 #+OPTIONS: toc:nil num:nil
 
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml/badge.svg]]
@@ -9,11 +9,25 @@
 
 Zig binding for Emacs's [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Writing-Dynamic-Modules.html][dynamic modules]].
 
+* Requirements
+
+- Zig 0.17.0
+- GNU Emacs 28 or newer
+- A C compiler supported by Zig
+
+The project translates ~include/emacs-module.h~ during the build, so Emacs
+headers do not need to be installed separately.
+
 * Docs
 
 See https://jiacai2050.github.io/zig-emacs/
 
-* Example
+* Minimal example
+
+Every module must call ~module_init~ at comptime and provide an ~init~
+function. Registered functions take ~emacs.Env~ as their first argument and
+return ~emacs.Value~ or ~!emacs.Value~.
+
 #+begin_src zig
 const std = @import("std");
 const emacs = @import("emacs");
@@ -23,31 +37,137 @@ comptime {
     emacs.module_init(@This());
 }
 
-fn add(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
-    const a = e.extractInteger(v1);
-    const b = e.extractInteger(v2);
-    return e.makeInteger(a + b);
+fn add(env: emacs.Env, lhs: emacs.Value, rhs: emacs.Value) emacs.Value {
+    return env.makeInteger(
+        env.extractInteger(lhs) + env.extractInteger(rhs),
+    );
 }
 
-// Emacs dynamic module entrypoint
 pub fn init(env: emacs.Env) c_int {
     env.makeFunction(
         "zig-add",
         add,
-        // This make `zig-add` interactive.
-        .{ .interactive_spec = "nFirst number: \nnSecond number: " },
-    );
+        .{ .doc_string = "Add two integers." },
+    ) catch return 1;
 
     return 0;
 }
 #+end_src
-Compile [[file:example.zig][this example]] with ~zig build~, then load it into Emacs.
-#+BEGIN_SRC emacs-lisp
 
-(module-load (expand-file-name "zig-out/lib/libzig-example.dylib"))
-(zig-greeting "Jiacai")
-#+END_SRC
-If everything is OK, you should see our greeting message in minibuffer.
+Compile [[file:example.zig][this example]] with ~zig build~, then load it into
+Emacs:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/zig-emacs/zig-out/lib/")
+(load "libzig-example")
+(zig-add 1 2)
+#+end_src
+
+The exact shared-library suffix depends on the target platform.
+
+* Build
+
+Build the example module:
+
+#+begin_src sh
+make build
+#+end_src
+
+The dynamic library is written to ~zig-out/lib/~. Run the tests with:
+
+#+begin_src sh
+make test
+#+end_src
+
+Check formatting with:
+
+#+begin_src sh
+make lint
+#+end_src
+
+* Allocator context
+
+Allocators are not stored inside ~Env~. Pass module state through
+~FuncContext.user_data~ and retrieve it with ~getUserData~:
+
+#+begin_src zig
+const ModuleContext = struct {
+    gpa: std.mem.Allocator,
+};
+
+var module_context: ModuleContext = .{
+    .gpa = std.heap.smp_allocator,
+};
+
+fn greeting(env: emacs.Env, value: emacs.Value) !emacs.Value {
+    const context = env.getUserData(ModuleContext) orelse {
+        return error.MissingModuleContext;
+    };
+    const text = try env.extractString(context.gpa, value);
+    defer context.gpa.free(text);
+    return env.makeString(text);
+}
+
+pub fn init(env: emacs.Env) c_int {
+    env.makeFunction(
+        "zig-greeting",
+        greeting,
+        .{ .user_data = @ptrCast(&module_context) },
+    ) catch return 1;
+    return 0;
+}
+#+end_src
+
+* Typed user pointers
+
+Use the typed user pointer API instead of casting ~*anyopaque~ in application
+code:
+
+#+begin_src zig
+const Resource = struct {
+    gpa: std.mem.Allocator,
+
+    fn deinit(self: *Resource) void {
+        self.gpa.destroy(self);
+    }
+};
+
+fn makeResource(env: emacs.Env, gpa: std.mem.Allocator) !emacs.Value {
+    const resource = try gpa.create(Resource);
+    resource.gpa = gpa;
+    return env.makeUserPointer(Resource, resource, Resource.deinit);
+}
+
+fn useResource(env: emacs.Env, value: emacs.Value) emacs.Value {
+    const resource = env.getUserPointer(Resource, value) orelse {
+        return env.nil;
+    };
+    _ = resource;
+    return env.t;
+}
+#+end_src
+
+The finalizer is optional. Pass ~null~ for a borrowed pointer that must not be
+freed by Emacs:
+
+#+begin_src zig
+const value = env.makeUserPointer(Config, config, null);
+#+end_src
+
+The pointed-to object must remain valid until Emacs runs its finalizer.
+
+* Calling Emacs functions
+
+~Env.funcall~ returns ~FuncallError!Value~ and reports Emacs signals and
+throws:
+
+#+begin_src zig
+var args = [_]emacs.Value{env.makeString("hello")};
+const result = try env.funcall("message", &args);
+#+end_src
+
+Use ~env.message~, ~env.signal~, and ~env.reportError~ when their dedicated
+helpers are more expressive.
 
 [[file:screenshot.jpg]]
 
