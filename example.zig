@@ -6,14 +6,12 @@ comptime {
     emacs.module_init(@This());
 }
 
-var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-var is_debug = true;
+var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
 
 pub const allocator = gpa: {
     break :gpa switch (@import("builtin").mode) {
-        .Debug, .ReleaseSafe => debug_allocator.allocator(),
+        .Debug, .ReleaseSafe => safe_allocator.allocator(),
         .ReleaseFast, .ReleaseSmall => {
-            is_debug = false;
             break :gpa std.heap.smp_allocator;
         },
     };
@@ -23,22 +21,17 @@ fn greeting(e: emacs.Env, value: emacs.Value) !emacs.Value {
     const username = try e.extractString(allocator, value);
     defer allocator.free(username);
 
-    const msg = try std.fmt.allocPrintSentinel(
-        allocator,
-        "hello {s}!",
-        .{username},
-        0,
-    );
+    const msg = try allocator.printSentinel("hello {s}!", .{username}, 0);
     defer allocator.free(msg);
 
     _ = e.message(msg);
     return e.makeString(msg);
 }
 
-fn add(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
-    const a = e.extractInteger(v1);
-    const b = e.extractInteger(v2);
-    return e.makeInteger(a + b);
+fn add(env: emacs.Env, first_value: emacs.Value, second_value: emacs.Value) emacs.Value {
+    const first_number = env.extractInteger(first_value);
+    const second_number = env.extractInteger(second_value);
+    return env.makeInteger(first_number + second_number);
 }
 
 const Database = struct {
@@ -49,13 +42,6 @@ const Database = struct {
 
         std.debug.print("Close db, id:{d}\n", .{self.id});
     }
-
-    fn userPointer(self: *Database) emacs.UserPointer {
-        return .{
-            .ptr = self,
-            .finalizer = finalizer,
-        };
-    }
 };
 
 fn makeDB(e: emacs.Env, value: emacs.Value) !emacs.Value {
@@ -65,11 +51,18 @@ fn makeDB(e: emacs.Env, value: emacs.Value) !emacs.Value {
     return e.makeUserPointer(db, Database.finalizer);
 }
 
-fn saveTextToDB(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
-    const db: *Database = @ptrCast(@alignCast(e.getUserPointer(v1)));
-    const body = e.extractInteger(v2);
+fn saveTextToDB(
+    env: emacs.Env,
+    database_value: emacs.Value,
+    body_value: emacs.Value,
+) emacs.Value {
+    const user_pointer = env.getUserPointer(database_value) orelse {
+        return env.reportError("invalid database pointer: ", error.InvalidDatabasePointer);
+    };
+    const db: *Database = @ptrCast(@alignCast(user_pointer));
+    const body = env.extractInteger(body_value);
     std.debug.print("Save {d} to db({d})\n", .{ body, db.id });
-    return e.t;
+    return env.t;
 }
 
 // Emacs dynamic module entrypoint
@@ -97,10 +90,13 @@ pub fn init(env: emacs.Env) c_int {
 }
 
 fn deinit(env: emacs.Env) emacs.Value {
-    if (is_debug) {
-        if (debug_allocator.deinit() != .ok) {
-            @panic("mem leaked!");
-        }
+    switch (@import("builtin").mode) {
+        .Debug, .ReleaseSafe => {
+            if (safe_allocator.deinit() != 0) {
+                @panic("Memory leak detected");
+            }
+        },
+        .ReleaseFast, .ReleaseSmall => {},
     }
 
     return env.nil;

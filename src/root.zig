@@ -4,13 +4,15 @@ const c = @import("c");
 const plugin_is_GPL_compatible: c_int = 1;
 
 pub fn module_init(comptime Module: type) void {
-    // Those exported variable and func are required by emacs. See:
+    // These exported variable and function are required by Emacs. See:
     // https://www.gnu.org/software/emacs/manual/html_node/elisp/Module-Initialization.html
     @export(&plugin_is_GPL_compatible, .{ .name = "plugin_is_GPL_compatible" });
 
     const Closure = struct {
         fn init(ert: ?*c.struct_emacs_runtime) callconv(.c) c_int {
-            if (!@hasDecl(Module, "init")) @compileError("emacs dynamic module must provider function `init`");
+            if (!@hasDecl(Module, "init")) {
+                @compileError("Emacs dynamic module must provide an `init` function");
+            }
             const env = Env.init(ert.?.get_environment.?(ert).?);
             return Module.init(env);
         }
@@ -43,7 +45,7 @@ const ptrdiff_t = c.ptrdiff_t;
 pub const Env = struct {
     inner: *c.emacs_env,
 
-    // global refs
+    // Global references.
     nil: Value,
     t: Value,
 
@@ -55,7 +57,7 @@ pub const Env = struct {
         };
     }
 
-    // c type -> emacs
+    // C type to Emacs.
     pub fn makeString(self: Env, input: [:0]const u8) Value {
         return self.inner.make_string.?(self.inner, input, @intCast(input.len));
     }
@@ -68,15 +70,22 @@ pub const Env = struct {
         return self.inner.make_float.?(self.inner, n);
     }
 
-    // emacs -> c type
+    // Emacs to C type.
     pub fn extractString(self: Env, allocator: std.mem.Allocator, v: Value) ![:0]const u8 {
         var len: ptrdiff_t = 0;
-        // pass null as buf to get len
-        _ = self.inner.copy_string_contents.?(self.inner, v, null, &len);
+        // The first call asks Emacs for the required null-terminated size.
+        if (!self.inner.copy_string_contents.?(self.inner, v, null, &len)) {
+            return error.CopyStringContentsFailed;
+        }
+        if (len <= 0) {
+            return error.InvalidStringLength;
+        }
         const buf = try allocator.alloc(u8, @intCast(len));
+        errdefer allocator.free(buf);
 
-        // fill buf
-        _ = self.inner.copy_string_contents.?(self.inner, v, buf.ptr, &len);
+        if (!self.inner.copy_string_contents.?(self.inner, v, buf.ptr, &len)) {
+            return error.CopyStringContentsFailed;
+        }
         return buf[0 .. buf.len - 1 :0];
     }
 
@@ -100,17 +109,26 @@ pub const Env = struct {
         return self.inner.eq.?(lhs, rhs);
     }
 
-    pub fn funcall(self: Env, fn_name: [:0]const u8, args: []const Value) Value {
+    pub fn funcall(self: Env, function_name: [:0]const u8, args: []Value) Value {
         return self.inner.funcall.?(
             self.inner,
-            self.intern(fn_name),
+            self.intern(function_name),
             @intCast(args.len),
-            @constCast(args.ptr),
+            args.ptr,
         );
     }
 
     pub fn shouldQuit(self: Env) bool {
-        return self.inner.should_quit.?(self.inner) or self.nonLocalExitCheck() != .@"return" or self.processInput() != .@"continue";
+        if (self.inner.should_quit.?(self.inner)) {
+            return true;
+        }
+        if (self.nonLocalExitCheck() != .@"return") {
+            return true;
+        }
+        if (self.processInput() != .@"continue") {
+            return true;
+        }
+        return false;
     }
 
     pub fn nonLocalExitCheck(self: Env) FuncCallExit {
@@ -138,7 +156,7 @@ pub const Env = struct {
         return self.inner.type_of.?(self.inner, v);
     }
 
-    /// This function define a module function.
+    /// This function defines an Emacs module function.
     pub fn makeFunction(
         self: Env,
         comptime name: [:0]const u8,
@@ -151,41 +169,66 @@ pub const Env = struct {
         };
         if (fn_info.is_generic) @compileError("emacs function can't be generic");
         if (fn_info.attrs.varargs) @compileError("emacs function can't be variadic");
-        if (fn_info.param_types.len == 0) @compileError("emacs function should contains at least one arg");
-        if (fn_info.param_types[0] != Env) @compileError("emacs function first arg should be Env type");
+        if (fn_info.param_types.len == 0) {
+            @compileError("Emacs functions must contain at least one argument");
+        }
+        if (fn_info.param_types[0] != Env) {
+            @compileError("The first Emacs function argument must have type Env");
+        }
         if (fn_info.return_type) |ret_type| {
             if (ret_type != Value) {
                 switch (@typeInfo(ret_type)) {
                     .error_union => |err_union| {
                         if (err_union.payload != Value) {
-                            @compileError("emacs function should return Value or !Value");
+                            @compileError("Emacs functions must return Value or !Value");
                         }
                     },
-                    else => @compileError("emacs function should return Value or !Value"),
+                    else => @compileError("Emacs functions must return Value or !Value"),
                 }
             }
         } else {
-            @compileError("emacs function should return Value or !Value");
+            @compileError("Emacs functions must return Value or !Value");
         }
 
-        // subtract the env argument
+        // The first function argument is the environment.
         const min_args: ptrdiff_t = @as(ptrdiff_t, @intCast(fn_info.param_types.len)) - 1;
-        const max_args = min_args; // TODO: now we only support fixed number of args.
+        const max_args: ptrdiff_t = min_args;
         const emacs_fn = self.inner.make_function.?(
             self.inner,
             min_args,
             max_args,
             struct {
-                fn emacs_fn(e: [*c]c.emacs_env, nargs: ptrdiff_t, emacs_args: [*c]Value, data: ?*anyopaque) callconv(.c) Value {
-                    _ = nargs;
-                    _ = data;
-
+                fn makeFunctionCallback(
+                    e: [*c]c.emacs_env,
+                    nargs: ptrdiff_t,
+                    emacs_args: [*c]Value,
+                    data: ?*anyopaque,
+                ) callconv(.c) Value {
+                    if (e == null) {
+                        std.log.err("Emacs passed a null environment", .{});
+                        return null;
+                    }
                     const zig_env = Env.init(e.?);
+                    if (data != null) {
+                        std.log.err("Emacs passed unexpected callback data", .{});
+                        return zig_env.nil;
+                    }
+                    if (nargs != min_args) {
+                        std.log.err("Emacs passed an unexpected argument count", .{});
+                        return zig_env.nil;
+                    }
+                    if (min_args > 0) {
+                        if (emacs_args == null) {
+                            std.log.err("Emacs passed null arguments", .{});
+                            return zig_env.nil;
+                        }
+                    }
+
                     var args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
                     args[0] = zig_env;
                     comptime var i: usize = 0;
                     inline while (i < min_args) : (i += 1) {
-                        // Remember the first argument is always the env
+                        // The first argument is the environment.
                         args[i + 1] = emacs_args[i];
                     }
 
@@ -197,7 +240,10 @@ pub const Env = struct {
                         @call(.auto, func, args)
                     else
                         @call(.auto, func, args) catch |err| {
-                            std.log.err("call function failed, func:{s}, err:{any}", .{ name, err });
+                            std.log.err(
+                                "call function failed, func:{s}, err:{any}",
+                                .{ name, err },
+                            );
                             zig_env.signal(err, .{
                                 zig_env.makeString("call function failed"),
                                 zig_env.makeString(name),
@@ -205,7 +251,7 @@ pub const Env = struct {
                             return zig_env.nil;
                         };
                 }
-            }.emacs_fn,
+            }.makeFunctionCallback,
             @ptrCast(ctx.doc_string),
             null,
         );
@@ -213,11 +259,10 @@ pub const Env = struct {
         if (ctx.interactive_spec) |spec| {
             self.inner.make_interactive.?(self.inner, emacs_fn, self.makeString(spec));
         }
-        _ = self.funcall("defalias", &[_]Value{
+        var defalias_args = [_]Value{
             self.intern(name), emacs_fn,
-        });
-
-        return;
+        };
+        _ = self.funcall("defalias", &defalias_args);
     }
 
     pub fn makeUserPointer(self: Env, user_ptr: *anyopaque, fin: anytype) Value {
@@ -238,7 +283,8 @@ pub const Env = struct {
     }
 
     pub fn message(self: Env, input: [:0]const u8) Value {
-        return self.funcall("message", &[_]Value{self.makeString(input)});
+        var args = [_]Value{self.makeString(input)};
+        return self.funcall("message", &args);
     }
 
     pub fn signal(self: Env, err: anyerror, args: anytype) void {
@@ -252,54 +298,19 @@ pub const Env = struct {
         inline for (args_type_info.@"struct".field_names, 0..) |field_name, i| {
             data[i] = @field(args, field_name);
         }
-        const symbol = self.funcall("make-symbol", &[_]Value{self.makeString(@errorName(err))});
+        var symbol_args = [_]Value{self.makeString(@errorName(err))};
+        const symbol = self.funcall("make-symbol", &symbol_args);
         self.nonLocalExitSignal(symbol, self.funcall("list", &data));
     }
 
-    pub fn reportError(self: Env, comptime tmpl: [:0]const u8, err: anyerror) Value {
-        return self.funcall("error", &[_]Value{ self.makeString(tmpl ++ "err:%s"), self.makeString(@errorName(err)) });
+    pub fn reportError(self: Env, comptime template: [:0]const u8, err: anyerror) Value {
+        var args = [_]Value{
+            self.makeString(template ++ "err:%s"),
+            self.makeString(@errorName(err)),
+        };
+        return self.funcall(
+            "error",
+            &args,
+        );
     }
 };
-
-/// This function convert Emacs type arg to Zig type.
-/// Not used for now
-fn convertTypeFromEmacs(allocator: ?std.mem.Allocator, comptime ArgType: type, env: Env, arg: *ArgType, v: Value) !void {
-    switch (@typeInfo(ArgType)) {
-        .float => arg.* = env.extractFloat(v),
-        .int => arg.* = @intCast(env.extractInteger(v)),
-        .pointer => |ptr| switch (ptr.size) {
-            .slice => switch (ptr.child) {
-                u8 => arg.* = blk: {
-                    if (allocator) |ally| {
-                        break :blk try env.extractString(ally, v);
-                    } else {
-                        return error.MissingAllocator;
-                    }
-                },
-                else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
-            },
-            .one => arg.* = blk: {
-                break :blk @ptrCast(@alignCast(env.getUserPointer(v)));
-                // TODO: handle null?
-                // break :blk if (env.getUserPointer(v)) |p|
-                //     @ptrCast(@alignCast(env.getUserPointer(p)))
-                // else
-                //     null;
-            },
-            else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
-        },
-        else => @compileError("cannot use an argument of type " ++ @typeName(ArgType)),
-    }
-}
-
-// TODO: How to encapuslate a user pointer?
-// pub const UserPointer =  struct {
-//     ptr: *anyopaque,
-//     finalizer: ?*const fn (ptr: *anyopaque) void = null,
-
-//     fn deinit(self: UserPointer) void {
-//         if (self.finalizer) |fin| {
-//             @call(.auto, fin, .{self.ptr});
-//         }
-//     }
-// };
