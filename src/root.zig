@@ -150,9 +150,9 @@ pub const Env = struct {
             else => @compileError("cannot use func, expecting a function"),
         };
         if (fn_info.is_generic) @compileError("emacs function can't be generic");
-        if (fn_info.is_var_args) @compileError("emacs function can't be variadic");
-        if (fn_info.params.len == 0) @compileError("emacs function should contains at least one arg");
-        if (fn_info.params[0].type != Env) @compileError("emacs function first arg should be Env type");
+        if (fn_info.attrs.varargs) @compileError("emacs function can't be variadic");
+        if (fn_info.param_types.len == 0) @compileError("emacs function should contains at least one arg");
+        if (fn_info.param_types[0] != Env) @compileError("emacs function first arg should be Env type");
         if (fn_info.return_type) |ret_type| {
             if (ret_type != Value) {
                 switch (@typeInfo(ret_type)) {
@@ -169,7 +169,7 @@ pub const Env = struct {
         }
 
         // subtract the env argument
-        const min_args: ptrdiff_t = @as(ptrdiff_t, @intCast(fn_info.params.len)) - 1;
+        const min_args: ptrdiff_t = @as(ptrdiff_t, @intCast(fn_info.param_types.len)) - 1;
         const max_args = min_args; // TODO: now we only support fixed number of args.
         const emacs_fn = self.inner.make_function.?(
             self.inner,
