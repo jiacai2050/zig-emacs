@@ -20,6 +20,7 @@ pub fn module_init(comptime Module: type) void {
 
 /// Emacs value used as argument or return type.
 pub const Value = c.emacs_value;
+pub const Integer = c.intmax_t;
 
 pub const FuncContext = struct {
     doc_string: ?[:0]const u8 = null,
@@ -37,8 +38,7 @@ pub const ProcessInputResult = enum(u32) {
     quit,
 };
 
-const ptrdiff_t = c_long;
-const intmax_t = c_long;
+const ptrdiff_t = c.ptrdiff_t;
 
 pub const Env = struct {
     inner: *c.emacs_env,
@@ -60,7 +60,7 @@ pub const Env = struct {
         return self.inner.make_string.?(self.inner, input, @intCast(input.len));
     }
 
-    pub fn makeInteger(self: Env, n: c_long) Value {
+    pub fn makeInteger(self: Env, n: Integer) Value {
         return self.inner.make_integer.?(self.inner, n);
     }
 
@@ -70,7 +70,7 @@ pub const Env = struct {
 
     // emacs -> c type
     pub fn extractString(self: Env, allocator: std.mem.Allocator, v: Value) ![:0]const u8 {
-        var len: c_long = 0;
+        var len: ptrdiff_t = 0;
         // pass null as buf to get len
         _ = self.inner.copy_string_contents.?(self.inner, v, null, &len);
         const buf = try allocator.alloc(u8, @intCast(len));
@@ -80,7 +80,7 @@ pub const Env = struct {
         return buf[0 .. buf.len - 1 :0];
     }
 
-    pub fn extractInteger(self: Env, v: Value) c_long {
+    pub fn extractInteger(self: Env, v: Value) Integer {
         return self.inner.extract_integer.?(self.inner, v);
     }
 
@@ -114,7 +114,7 @@ pub const Env = struct {
     }
 
     pub fn nonLocalExitCheck(self: Env) FuncCallExit {
-        return @enumFromInt(self.inner.non_local_exit_check.?(self.inner));
+        return @fromBackingInt(@intCast(self.inner.non_local_exit_check.?(self.inner)));
     }
 
     /// This function clears the pending nonlocal exit conditions and data from env.
@@ -131,7 +131,7 @@ pub const Env = struct {
     }
 
     pub fn processInput(self: Env) ProcessInputResult {
-        return @enumFromInt(self.inner.process_input.?(self.inner));
+        return @fromBackingInt(@intCast(self.inner.process_input.?(self.inner)));
     }
 
     pub fn typeOf(self: Env, v: Value) Value {
@@ -176,7 +176,7 @@ pub const Env = struct {
             min_args,
             max_args,
             struct {
-                fn emacs_fn(e: ?*c.emacs_env, nargs: ptrdiff_t, emacs_args: [*c]Value, data: ?*anyopaque) callconv(.c) Value {
+                fn emacs_fn(e: [*c]c.emacs_env, nargs: ptrdiff_t, emacs_args: [*c]Value, data: ?*anyopaque) callconv(.c) Value {
                     _ = nargs;
                     _ = data;
 
@@ -248,9 +248,9 @@ pub const Env = struct {
             @compileError("expected tuple or struct argument, found " ++ @typeName(ArgsType));
         }
 
-        var data: [args_type_info.@"struct".fields.len]Value = undefined;
-        inline for (args_type_info.@"struct".fields, 0..) |fld, i| {
-            data[i] = @field(args, fld.name);
+        var data: [args_type_info.@"struct".field_names.len]Value = undefined;
+        inline for (args_type_info.@"struct".field_names, 0..) |field_name, i| {
+            data[i] = @field(args, field_name);
         }
         const symbol = self.funcall("make-symbol", &[_]Value{self.makeString(@errorName(err))});
         self.nonLocalExitSignal(symbol, self.funcall("list", &data));

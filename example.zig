@@ -42,7 +42,7 @@ fn add(e: emacs.Env, v1: emacs.Value, v2: emacs.Value) emacs.Value {
 }
 
 const Database = struct {
-    id: c_long,
+    id: emacs.Integer,
     fn finalizer(ptr: *anyopaque) void {
         const self: *Database = @ptrCast(@alignCast(ptr));
         defer allocator.destroy(self);
