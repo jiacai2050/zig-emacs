@@ -169,6 +169,47 @@ const result = try env.funcall("message", &args);
 Use ~env.message~, ~env.signal~, and ~env.reportError~ when their dedicated
 helpers are more expressive.
 
+* Pipe channel example
+
+~openChannel~ connects native code to an Emacs ~make-pipe-process~. The Zig
+function writes to the process filter and closes the channel when it returns:
+
+#+begin_src emacs-lisp
+(let ((process
+       (make-pipe-process
+        :name "zig-channel"
+        :filter (lambda (_process output)
+                  (message "Zig says: %s" (string-trim output))))))
+  (zig-send-to-channel process "hello from Zig"))
+#+end_src
+
+The corresponding module function is:
+
+#+begin_src zig
+fn sendToChannel(
+    env: emacs.Env,
+    process_value: emacs.Value,
+    message_value: emacs.Value,
+) !emacs.Value {
+    const context = env.getUserData(ModuleContext) orelse {
+        return error.MissingModuleContext;
+    };
+    var channel = try env.openChannel(process_value);
+    defer channel.deinit() catch |err| {
+        std.log.err("failed to close Emacs channel: {s}", .{@errorName(err)});
+    };
+
+    const message = try env.extractString(context.gpa, message_value);
+    defer context.gpa.free(message);
+    try channel.write(message);
+    try channel.write("\n");
+    return env.t;
+}
+#+end_src
+
+For long-running work, move the owned ~Channel~ into a background thread and
+call ~deinit~ in that thread after the final write.
+
 [[file:screenshot.jpg]]
 
 * Usage

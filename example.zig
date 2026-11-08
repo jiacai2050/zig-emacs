@@ -98,6 +98,28 @@ fn saveTextToDB(
     return env.t;
 }
 
+/// Sends text to an Emacs pipe process, where its process filter can handle it.
+fn sendToChannel(
+    env: emacs.Env,
+    process_value: emacs.Value,
+    message_value: emacs.Value,
+) !emacs.Value {
+    const context = env.getUserData(ModuleContext) orelse {
+        return error.MissingModuleContext;
+    };
+    var channel = try env.openChannel(process_value);
+    defer channel.deinit() catch |err| {
+        std.log.err("failed to close Emacs channel: {s}", .{@errorName(err)});
+    };
+
+    const message = try env.extractString(context.gpa, message_value);
+    defer context.gpa.free(message);
+
+    try channel.write(message);
+    try channel.write("\n");
+    return env.t;
+}
+
 // Emacs dynamic module entrypoint
 /// Registers the example module functions with Emacs.
 pub fn init(env: emacs.Env) c_int {
@@ -131,6 +153,14 @@ pub fn init(env: emacs.Env) c_int {
         "save-text-to-db",
         saveTextToDB,
         .{ .user_data = @ptrCast(&module_context) },
+    ) catch return 1;
+    env.makeFunction(
+        "zig-send-to-channel",
+        sendToChannel,
+        .{
+            .doc_string = "Send text to an Emacs pipe process filter.",
+            .user_data = @ptrCast(&module_context),
+        },
     ) catch return 1;
 
     return 0;

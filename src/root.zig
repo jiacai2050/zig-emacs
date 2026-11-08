@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c");
 
 const plugin_is_GPL_compatible: c_int = 1;
@@ -43,11 +44,24 @@ pub const Finalizer = *const fn (?*anyopaque) callconv(.c) void;
 pub const ChannelError = error{
     OpenFailed,
     CloseFailed,
+    WriteFailed,
+    WriteIncomplete,
 };
 
 /// Owns the native file descriptor returned by Emacs open_channel.
 pub const Channel = struct {
     file_descriptor: i32,
+
+    /// Writes one complete message to the Emacs process pipe.
+    pub fn write(channel: Channel, data: []const u8) ChannelError!void {
+        const written = writeFileDescriptor(channel.file_descriptor, data);
+        if (written < 0) {
+            return error.WriteFailed;
+        }
+        if (written != data.len) {
+            return error.WriteIncomplete;
+        }
+    }
 
     /// Releases the channel and closes its native file descriptor.
     pub fn deinit(channel: *Channel) ChannelError!void {
@@ -55,13 +69,41 @@ pub const Channel = struct {
             return;
         }
 
-        const result = std.c.close(@intCast(channel.file_descriptor));
+        const result = closeFileDescriptor(channel.file_descriptor);
         if (result != 0) {
             return error.CloseFailed;
         }
         channel.file_descriptor = -1;
     }
 };
+
+fn writeFileDescriptor(file_descriptor: i32, data: []const u8) isize {
+    if (comptime builtin.os.tag == .windows) {
+        const Windows = struct {
+            extern "c" fn _write(
+                file_descriptor: c_int,
+                data: [*]const u8,
+                size: c_uint,
+            ) c_int;
+        };
+        return @intCast(Windows._write(
+            @intCast(file_descriptor),
+            data.ptr,
+            @intCast(data.len),
+        ));
+    }
+    return std.c.write(@intCast(file_descriptor), data.ptr, data.len);
+}
+
+fn closeFileDescriptor(file_descriptor: i32) c_int {
+    if (comptime builtin.os.tag == .windows) {
+        const Windows = struct {
+            extern "c" fn _close(file_descriptor: c_int) c_int;
+        };
+        return Windows._close(@intCast(file_descriptor));
+    }
+    return std.c.close(@intCast(file_descriptor));
+}
 
 /// Metadata used when registering a Zig function with Emacs.
 pub const FuncContext = struct {
