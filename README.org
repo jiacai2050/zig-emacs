@@ -45,14 +45,14 @@ module.addImport("emacs", emacs_dep.module("emacs"));
 
 * Quickstart
 
-Every module must call ~module_init~ at comptime and provide an ~init~ function. Registered functions accept ~emacs.Env~ as their first argument and return ~emacs.Value~ or ~!emacs.Value~.
+Every module must call ~moduleInit~ at comptime and provide an ~init~ function. Registered functions accept ~emacs.Env~ as their first argument and return ~emacs.Value~ or ~!emacs.Value~.
 
 #+begin_src zig
 const std = @import("std");
 const emacs = @import("emacs");
 
 comptime {
-    emacs.module_init(@This());
+    emacs.moduleInit(@This());
 }
 
 fn add(env: emacs.Env, lhs: emacs.Value, rhs: emacs.Value) emacs.Value {
@@ -158,6 +158,47 @@ Convenience wrappers are available:
 - ~env.message(str)~: Print directly to the echo area / ~*Messages*~ buffer.
 - ~env.reportError(prefix, err)~: Call the Emacs ~error~ function.
 - ~env.signal(err, args)~: Raise an Emacs signal from a Zig error.
+
+** Native Types, Sequences & Object Wrappers
+
+~zig-emacs~ provides rich, object-oriented Zig structs for manipulating Emacs data structures without low-level C-ABI boilerplate:
+
+#+begin_src zig
+// 1. Pattern matching on Emacs value types
+switch (env.getType(val)) {
+    .integer => { const n = env.extractInteger(val); },
+    .string => { const s = try env.extractString(allocator, val); },
+    .nil => { ... },
+    else => { ... },
+}
+
+// 2. Unified Sequence (accepts both Emacs Vector and List!)
+if (env.toSequence(val)) |seq| {
+    const len = try seq.len();
+    const items = try seq.toSlice(allocator);
+    defer allocator.free(items);
+}
+
+// 3. Object-oriented Vector
+const vec = try emacs.Vector.create(env, &[_]emacs.Value{ a, b });
+const first_item = vec.get(0);
+vec.set(1, c);
+
+// 4. Object-oriented List
+const list = try emacs.List.create(env, &[_]emacs.Value{ a, b });
+const head = try list.car();
+const tail = try list.cdr();
+
+// 5. Type-safe UserPointer handle
+const MyHandle = emacs.UserPointer(MyResource);
+const handle = MyHandle.create(env, res, MyResource.deinit);
+// Or wrap an existing user pointer value:
+// const handle = MyHandle.init(env, user_ptr_val);
+if (handle.getChecked(MyResource.magic)) |res_ptr| {
+    res_ptr.doWork();
+}
+handle.deinit(); // sets user-ptr to null
+#+end_src
 
 ** Non-blocking Async Streaming
 

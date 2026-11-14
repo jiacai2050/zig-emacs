@@ -3,7 +3,7 @@ const emacs = @import("emacs");
 const matcher = @import("matcher.zig");
 
 comptime {
-    emacs.module_init(@This());
+    emacs.moduleInit(@This());
 }
 
 var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
@@ -40,10 +40,17 @@ fn fuzzyMatchVector(
     limit_val: emacs.Value,
 ) !emacs.Value {
     const context = env.getUserData(ModuleContext) orelse return error.MissingModuleContext;
-    const count = env.vectorSize(candidates_val);
-    if (count <= 0) {
-        var empty_args = [_]emacs.Value{};
-        return try env.funcall("vector", &empty_args);
+    const seq = env.toSequence(candidates_val) orelse {
+        const empty_vec = try emacs.Vector.createEmpty(env, 0);
+        return empty_vec.value;
+    };
+
+    const original_values = try seq.toSlice(context.gpa);
+    defer context.gpa.free(original_values);
+
+    if (original_values.len == 0) {
+        const empty_vec = try emacs.Vector.createEmpty(env, 0);
+        return empty_vec.value;
     }
 
     const query = try env.extractString(context.gpa, query_val);
@@ -57,25 +64,17 @@ fn fuzzyMatchVector(
         }
     }
 
-    // Extract candidates into slice
-    const usize_count: usize = @intCast(count);
-    var candidate_list = try context.gpa.alloc([:0]const u8, usize_count);
+    const count = original_values.len;
+    var candidate_list = try context.gpa.alloc([:0]const u8, count);
     defer {
-        for (candidate_list[0..usize_count]) |item| {
+        for (candidate_list) |item| {
             context.gpa.free(item);
         }
         context.gpa.free(candidate_list);
     }
 
-    // Also keep track of the original emacs values to avoid re-creating strings
-    var original_values = try context.gpa.alloc(emacs.Value, usize_count);
-    defer context.gpa.free(original_values);
-
-    var i: isize = 0;
-    while (i < count) : (i += 1) {
-        const item_val = env.vectorGet(candidates_val, i);
-        original_values[@intCast(i)] = item_val;
-        candidate_list[@intCast(i)] = try env.extractString(context.gpa, item_val);
+    for (original_values, 0..) |item_val, i| {
+        candidate_list[i] = try env.extractString(context.gpa, item_val);
     }
 
     // Collect matches with their original index
@@ -96,35 +95,27 @@ fn fuzzyMatchVector(
         }
     }
 
-    const sortFn = struct {
-        fn sort(_: void, lhs: MatchWithIndex, rhs: MatchWithIndex) bool {
+    const MatchSorter = struct {
+        fn desc(_: void, lhs: MatchWithIndex, rhs: MatchWithIndex) bool {
             return lhs.score > rhs.score;
         }
-    }.sort;
+    };
 
     const matched_items = try matches.toOwnedSlice(context.gpa);
     defer context.gpa.free(matched_items);
-    std.mem.sort(MatchWithIndex, matched_items, {}, sortFn);
+    std.mem.sort(MatchWithIndex, matched_items, {}, MatchSorter.desc);
 
     const result_count = if (limit) |lim|
         @min(lim, matched_items.len)
     else
         matched_items.len;
 
-    // Create resulting Emacs vector using funcall make-vector and vectorSet
-    var make_vec_args = [_]emacs.Value{
-        env.makeInteger(@intCast(result_count)),
-        env.nil,
-    };
-    const result_vec = try env.funcall("make-vector", &make_vec_args);
-
-    var res_idx: usize = 0;
-    while (res_idx < result_count) : (res_idx += 1) {
-        const orig_idx = matched_items[res_idx].index;
-        env.vectorSet(result_vec, @intCast(res_idx), original_values[orig_idx]);
+    const result_vec = try emacs.Vector.createEmpty(env, result_count);
+    for (0..result_count) |res_idx| {
+        result_vec.set(res_idx, original_values[matched_items[res_idx].index]);
     }
 
-    return result_vec;
+    return result_vec.value;
 }
 
 pub fn init(env: emacs.Env) c_int {

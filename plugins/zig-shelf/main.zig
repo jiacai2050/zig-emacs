@@ -4,7 +4,7 @@ const storage = @import("storage.zig");
 const Storage = storage.Storage;
 
 comptime {
-    emacs.module_init(@This());
+    emacs.moduleInit(@This());
 }
 
 var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
@@ -20,29 +20,33 @@ var module_context = ModuleContext{
     },
 };
 
+const ShelfPtr = emacs.UserPointer(Storage);
+
 fn shelfFinalizer(store: *Storage) void {
     if (store.magic_value != Storage.magic) return;
     store.deinit();
 }
 
 fn getValidStorage(env: emacs.Env, val: emacs.Value) ?*Storage {
-    const store = env.getUserPointer(Storage, val) orelse return null;
-    if (store.magic_value != Storage.magic) return null;
-    return store;
+    const handle = ShelfPtr.init(env, val) orelse return null;
+    return handle.getChecked(Storage.magic);
 }
 
 fn shelfOpen(env: emacs.Env) !emacs.Value {
     const context = env.getUserData(ModuleContext) orelse return error.MissingModuleContext;
     const store = try Storage.init(context.gpa);
-    return env.makeUserPointer(Storage, store, shelfFinalizer);
+    return ShelfPtr.create(env, store, shelfFinalizer).value;
 }
 
 fn shelfClose(env: emacs.Env, shelf_val: emacs.Value) !emacs.Value {
-    const store = getValidStorage(env, shelf_val) orelse {
+    const handle = ShelfPtr.init(env, shelf_val) orelse {
+        return env.reportError("invalid shelf pointer: ", error.InvalidShelfPointer);
+    };
+    const store = handle.getChecked(Storage.magic) orelse {
         return env.reportError("invalid shelf pointer: ", error.InvalidShelfPointer);
     };
     store.deinit();
-    env.setUserPointer(Storage, shelf_val, null);
+    handle.deinit();
     return env.t;
 }
 
@@ -83,11 +87,7 @@ fn shelfGet(
     const val = store.get(context.gpa, key);
     if (val) |v| {
         defer context.gpa.free(v);
-        // Create null-terminated string for Emacs
-        const sentinel_val = try context.gpa.allocSentinel(u8, v.len, 0);
-        defer context.gpa.free(sentinel_val);
-        @memcpy(sentinel_val, v);
-        return env.makeString(sentinel_val);
+        return try env.formatString(context.gpa, "{s}", .{v});
     }
     return env.nil;
 }
@@ -105,7 +105,7 @@ fn shelfDelete(
     const key = try env.extractString(context.gpa, key_val);
     defer context.gpa.free(key);
 
-    return if (store.delete(key)) env.t else env.nil;
+    return env.boolean(store.delete(key));
 }
 
 fn shelfCount(

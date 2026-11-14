@@ -1,9 +1,9 @@
 const std = @import("std");
 const emacs = @import("emacs");
 
-// Every module needs to call `module_init` in order to register with Emacs.
+// Every module needs to call `moduleInit` in order to register with Emacs.
 comptime {
-    emacs.module_init(@This());
+    emacs.moduleInit(@This());
 }
 
 var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
@@ -26,11 +26,9 @@ fn greeting(env: emacs.Env, value: emacs.Value) !emacs.Value {
     const username = try env.extractString(context.gpa, value);
     defer context.gpa.free(username);
 
-    const msg = try context.gpa.printSentinel("hello {s}!", .{username}, 0);
-    defer context.gpa.free(msg);
-
-    _ = try env.message(msg);
-    return env.makeString(msg);
+    const res = try env.formatString(context.gpa, "hello {s}!", .{username});
+    _ = try env.funcall("message", &[_]emacs.Value{res});
+    return res;
 }
 
 fn add(env: emacs.Env, first_value: emacs.Value, second_value: emacs.Value) emacs.Value {
@@ -159,6 +157,103 @@ pub fn init(env: emacs.Env) c_int {
         sendToChannel,
         .{
             .doc_string = "Send text to an Emacs pipe process filter.",
+            .user_data = @ptrCast(&module_context),
+        },
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-predicates",
+        struct {
+            fn testPredicates(env_arg: emacs.Env, val: emacs.Value) !emacs.Value {
+                const items = [_]emacs.Value{
+                    env_arg.boolean(env_arg.isNil(val)),
+                    env_arg.boolean(env_arg.isInteger(val)),
+                    env_arg.boolean(env_arg.isFloat(val)),
+                    env_arg.boolean(env_arg.isNumber(val)),
+                    env_arg.boolean(env_arg.isString(val)),
+                    env_arg.boolean(env_arg.isSymbol(val)),
+                    env_arg.boolean(env_arg.isVector(val)),
+                    env_arg.boolean(env_arg.isUserPointer(val)),
+                    env_arg.boolean(env_arg.isCons(val)),
+                    env_arg.boolean(env_arg.isList(val)),
+                };
+                return env_arg.makeList(&items);
+            }
+        }.testPredicates,
+        .{
+            .doc_string = "Test type predicates on val.",
+            .user_data = @ptrCast(&module_context),
+        },
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-list-ops",
+        struct {
+            fn testListOps(env_arg: emacs.Env, val: emacs.Value) !emacs.Value {
+                const context = env_arg.getUserData(ModuleContext) orelse return error.MissingModuleContext;
+                const len = try env_arg.listLength(val);
+                const items = try env_arg.extractList(context.gpa, val);
+                defer context.gpa.free(items);
+
+                var reversed = env_arg.nil;
+                for (items) |item| {
+                    reversed = try env_arg.cons(item, reversed);
+                }
+
+                const res = [_]emacs.Value{
+                    env_arg.makeInteger(@intCast(len)),
+                    reversed,
+                };
+                return env_arg.makeList(&res);
+            }
+        }.testListOps,
+        .{
+            .doc_string = "Test list operations on val.",
+            .user_data = @ptrCast(&module_context),
+        },
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-type-enum",
+        struct {
+            fn testTypeEnum(env_arg: emacs.Env, val: emacs.Value) emacs.Value {
+                const t_name = switch (env_arg.getType(val)) {
+                    .nil => "nil",
+                    .integer => "integer",
+                    .float => "float",
+                    .string => "string",
+                    .symbol => "symbol",
+                    .vector => "vector",
+                    .cons => "cons",
+                    .user_ptr => "user_ptr",
+                    .function => "function",
+                    .other => "other",
+                };
+                return env_arg.makeString(t_name);
+            }
+        }.testTypeEnum,
+        .{
+            .doc_string = "Return type enum as string.",
+            .user_data = @ptrCast(&module_context),
+        },
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-sequence",
+        struct {
+            fn testSequence(env_arg: emacs.Env, val: emacs.Value) !emacs.Value {
+                const context = env_arg.getUserData(ModuleContext) orelse return error.MissingModuleContext;
+                const seq = env_arg.toSequence(val) orelse return env_arg.nil;
+                const items = try seq.toSlice(context.gpa);
+                defer context.gpa.free(items);
+
+                // Return a Vector containing the items
+                const vec = try emacs.Vector.create(env_arg, items);
+                return vec.value;
+            }
+        }.testSequence,
+        .{
+            .doc_string = "Test Sequence abstraction by converting to Vector.",
             .user_data = @ptrCast(&module_context),
         },
     ) catch return 1;

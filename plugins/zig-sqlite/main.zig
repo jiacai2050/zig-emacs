@@ -4,7 +4,7 @@ const sqlite = @import("sqlite");
 const c = sqlite.c;
 
 comptime {
-    emacs.module_init(@This());
+    emacs.moduleInit(@This());
 }
 
 var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
@@ -35,18 +35,19 @@ pub const SQLiteDb = struct {
     }
 };
 
+const SqliteHandle = emacs.UserPointer(SQLiteDb);
+
 fn sqliteFinalizer(db: *SQLiteDb) void {
     db.deinit();
 }
 
 fn getValidDb(env: emacs.Env, val: emacs.Value) ?*SQLiteDb {
-    const db = env.getUserPointer(SQLiteDb, val) orelse return null;
-    if (db.magic_value != SQLiteDb.magic) return null;
-    return db;
+    const handle = SqliteHandle.init(env, val) orelse return null;
+    return handle.getChecked(SQLiteDb.magic);
 }
 
-fn sqliteP(env: emacs.Env, val: emacs.Value) emacs.Value {
-    return if (getValidDb(env, val) != null) env.t else env.nil;
+fn sqlitePredicate(env: emacs.Env, val: emacs.Value) emacs.Value {
+    return env.boolean(getValidDb(env, val) != null);
 }
 
 fn sqliteOpen(env: emacs.Env, path_val: emacs.Value) !emacs.Value {
@@ -76,86 +77,44 @@ fn sqliteOpen(env: emacs.Env, path_val: emacs.Value) !emacs.Value {
         .db = native_db,
     };
 
-    return env.makeUserPointer(SQLiteDb, wrapper, sqliteFinalizer);
+    return SqliteHandle.create(env, wrapper, sqliteFinalizer).value;
 }
 
 fn sqliteClose(env: emacs.Env, db_val: emacs.Value) !emacs.Value {
-    const db = getValidDb(env, db_val) orelse {
+    const handle = SqliteHandle.init(env, db_val) orelse {
+        return env.reportError("invalid sqlite database pointer: ", error.InvalidDatabasePointer);
+    };
+    const db = handle.getChecked(SQLiteDb.magic) orelse {
         return env.reportError("invalid sqlite database pointer: ", error.InvalidDatabasePointer);
     };
     db.deinit();
-    env.setUserPointer(SQLiteDb, db_val, null);
+    handle.deinit();
     return env.t;
 }
 
 fn bindValues(env: emacs.Env, allocator: std.mem.Allocator, stmt: ?*c.sqlite3_stmt, values_val: emacs.Value) !void {
-    if (!env.isNotNil(values_val)) return;
+    const seq = env.toSequence(values_val) orelse return;
+    const values_items = try seq.toSlice(allocator);
 
-    // Check if values is vector or list
-    const is_vec = blk: {
-        var args = [_]emacs.Value{values_val};
-        const res = try env.funcall("vectorp", &args);
-        break :blk env.isNotNil(res);
-    };
-
-    var values_list = std.ArrayList(emacs.Value).empty;
-    defer values_list.deinit(allocator);
-
-    if (is_vec) {
-        const count = env.vectorSize(values_val);
-        var i: isize = 0;
-        while (i < count) : (i += 1) {
-            try values_list.append(allocator, env.vectorGet(values_val, i));
-        }
-    } else {
-        // Assume list: iterate using car and cdr
-        var cur = values_val;
-        while (env.isNotNil(cur)) {
-            var car_args = [_]emacs.Value{cur};
-            const item = try env.funcall("car", &car_args);
-            try values_list.append(allocator, item);
-
-            var cdr_args = [_]emacs.Value{cur};
-            cur = try env.funcall("cdr", &cdr_args);
-        }
-    }
-
-    // Bind each value (1-indexed in SQLite)
-    for (values_list.items, 0..) |v, idx| {
+    for (values_items, 0..) |v, idx| {
         const param_idx: c_int = @intCast(idx + 1);
 
-        if (!env.isNotNil(v)) {
-            _ = c.sqlite3_bind_null(stmt, param_idx);
-            continue;
+        switch (env.getType(v)) {
+            .nil => _ = c.sqlite3_bind_null(stmt, param_idx),
+            .integer => {
+                const int_val = env.extractInteger(v);
+                _ = c.sqlite3_bind_int64(stmt, param_idx, @intCast(int_val));
+            },
+            .float => {
+                const float_val = env.extractFloat(v);
+                _ = c.sqlite3_bind_double(stmt, param_idx, float_val);
+            },
+            .string => {
+                const str_val = try env.extractString(allocator, v);
+                _ = c.sqlite3_bind_text(stmt, param_idx, str_val.ptr, @intCast(str_val.len), c.SQLITE_STATIC);
+            },
+            else => _ = c.sqlite3_bind_null(stmt, param_idx),
         }
-
-        // Determine type of v
-        var int_args = [_]emacs.Value{v};
-        const is_int = env.isNotNil(try env.funcall("integerp", &int_args));
-        if (is_int) {
-            const int_val = env.extractInteger(v);
-            _ = c.sqlite3_bind_int64(stmt, param_idx, @intCast(int_val));
-            continue;
-        }
-
-        var float_args = [_]emacs.Value{v};
-        const is_float = env.isNotNil(try env.funcall("floatp", &float_args));
-        if (is_float) {
-            const float_val = env.extractFloat(v);
-            _ = c.sqlite3_bind_double(stmt, param_idx, float_val);
-            continue;
-        }
-
-        var str_args = [_]emacs.Value{v};
-        const is_str = env.isNotNil(try env.funcall("stringp", &str_args));
-        if (is_str) {
-            const str_val = try env.extractString(allocator, v);
-            _ = c.sqlite3_bind_text(stmt, param_idx, str_val.ptr, @intCast(str_val.len), c.SQLITE_STATIC);
-            continue;
-        }
-
-        // Default to null
-        _ = c.sqlite3_bind_null(stmt, param_idx);
     }
 }
 
@@ -349,22 +308,13 @@ fn sqliteSelect(
                 else => env.nil,
             };
 
-            var cons_args = [_]emacs.Value{ val, row_list };
-            row_list = try env.funcall("cons", &cons_args);
+            row_list = try env.cons(val, row_list);
         }
 
         try rows.append(context.gpa, row_list);
     }
 
-    var result_list = env.nil;
-    if (rows.items.len > 0) {
-        var idx = rows.items.len;
-        while (idx > 0) {
-            idx -= 1;
-            var cons_args = [_]emacs.Value{ rows.items[idx], result_list };
-            result_list = try env.funcall("cons", &cons_args);
-        }
-    }
+    var result_list = try env.makeList(rows.items);
 
     if (is_full) {
         var col_names_list = env.nil;
@@ -378,12 +328,10 @@ fn sqliteSelect(
             defer context.gpa.free(z_name);
             @memcpy(z_name, name_slice);
 
-            var cons_args = [_]emacs.Value{ env.makeString(z_name), col_names_list };
-            col_names_list = try env.funcall("cons", &cons_args);
+            col_names_list = try env.cons(env.makeString(z_name), col_names_list);
         }
 
-        var full_cons_args = [_]emacs.Value{ col_names_list, result_list };
-        result_list = try env.funcall("cons", &full_cons_args);
+        result_list = try env.cons(col_names_list, result_list);
     }
 
     return result_list;
@@ -493,7 +441,7 @@ pub fn init(env: emacs.Env) c_int {
 
     env.makeFunction(
         "zig-sqlite--valid-p",
-        sqliteP,
+        sqlitePredicate,
         .{
             .doc_string = "Return non-nil if OBJECT is a valid zig-sqlite database.",
             .user_data = @ptrCast(&module_context),

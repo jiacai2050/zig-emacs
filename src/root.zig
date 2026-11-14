@@ -5,7 +5,7 @@ const c = @import("c");
 const plugin_is_GPL_compatible: c_int = 1;
 
 /// Exports the Emacs module entry points for the given module implementation.
-pub fn module_init(comptime Module: type) void {
+pub fn moduleInit(comptime Module: type) void {
     // These exported variable and function are required by Emacs. See:
     // https://www.gnu.org/software/emacs/manual/html_node/elisp/Module-Initialization.html
     @export(&plugin_is_GPL_compatible, .{ .name = "plugin_is_GPL_compatible" });
@@ -53,8 +53,8 @@ pub const Channel = struct {
     file_descriptor: i32,
 
     /// Writes one complete message to the Emacs process pipe.
-    pub fn write(channel: Channel, data: []const u8) ChannelError!void {
-        const written = writeFileDescriptor(channel.file_descriptor, data);
+    pub fn write(self: Channel, data: []const u8) ChannelError!void {
+        const written = writeFileDescriptor(self.file_descriptor, data);
         if (written < 0) {
             return error.WriteFailed;
         }
@@ -64,16 +64,16 @@ pub const Channel = struct {
     }
 
     /// Releases the channel and closes its native file descriptor.
-    pub fn deinit(channel: *Channel) ChannelError!void {
-        if (channel.file_descriptor < 0) {
+    pub fn deinit(self: *Channel) ChannelError!void {
+        if (self.file_descriptor < 0) {
             return;
         }
 
-        const result = closeFileDescriptor(channel.file_descriptor);
+        const result = closeFileDescriptor(self.file_descriptor);
         if (result != 0) {
             return error.CloseFailed;
         }
-        channel.file_descriptor = -1;
+        self.file_descriptor = -1;
     }
 };
 
@@ -142,6 +142,184 @@ pub const NonLocalExit = struct {
 };
 
 const Index = isize;
+
+/// Emacs value types represented as a Zig enum.
+pub const Type = enum {
+    nil,
+    integer,
+    float,
+    string,
+    symbol,
+    vector,
+    cons,
+    user_ptr,
+    function,
+    other,
+};
+
+/// High-level wrapper for an Emacs vector.
+pub const Vector = struct {
+    env: Env,
+    value: Value,
+
+    pub fn init(env: Env, v: Value) ?Vector {
+        if (!env.isVector(v)) return null;
+        return .{ .env = env, .value = v };
+    }
+
+    pub fn create(env: Env, values: []const Value) !Vector {
+        var args = [_]Value{
+            env.makeInteger(@intCast(values.len)),
+            env.nil,
+        };
+        const vec_val = try env.funcall("make-vector", &args);
+        for (values, 0..) |item, i| {
+            env.vectorSet(vec_val, @intCast(i), item);
+        }
+        return .{ .env = env, .value = vec_val };
+    }
+
+    pub fn createEmpty(env: Env, count: usize) !Vector {
+        var args = [_]Value{
+            env.makeInteger(@intCast(count)),
+            env.nil,
+        };
+        const vec_val = try env.funcall("make-vector", &args);
+        return .{ .env = env, .value = vec_val };
+    }
+
+    pub fn len(self: Vector) usize {
+        const size = self.env.vectorSize(self.value);
+        return if (size > 0) @intCast(size) else 0;
+    }
+
+    pub fn get(self: Vector, index: usize) Value {
+        return self.env.vectorGet(self.value, @intCast(index));
+    }
+
+    pub fn set(self: Vector, index: usize, val: Value) void {
+        self.env.vectorSet(self.value, @intCast(index), val);
+    }
+
+    pub fn toSlice(self: Vector, allocator: std.mem.Allocator) ![]Value {
+        const count = self.len();
+        const slice = try allocator.alloc(Value, count);
+        for (0..count) |i| {
+            slice[i] = self.get(i);
+        }
+        return slice;
+    }
+};
+
+/// High-level wrapper for an Emacs list.
+pub const List = struct {
+    env: Env,
+    value: Value,
+
+    pub fn init(env: Env, v: Value) ?List {
+        if (!env.isList(v)) return null;
+        return .{ .env = env, .value = v };
+    }
+
+    pub fn create(env: Env, values: []const Value) !List {
+        const list_val = try env.makeList(values);
+        return .{ .env = env, .value = list_val };
+    }
+
+    pub fn isEmpty(self: List) bool {
+        return self.env.isNil(self.value);
+    }
+
+    pub fn len(self: List) !usize {
+        return self.env.listLength(self.value);
+    }
+
+    pub fn car(self: List) !Value {
+        return self.env.car(self.value);
+    }
+
+    pub fn cdr(self: List) !List {
+        const next_val = try self.env.cdr(self.value);
+        return .{ .env = self.env, .value = next_val };
+    }
+
+    pub fn toSlice(self: List, allocator: std.mem.Allocator) ![]Value {
+        return self.env.extractList(allocator, self.value);
+    }
+};
+
+/// Unified abstraction over an Emacs sequence (either Vector or List).
+pub const Sequence = struct {
+    env: Env,
+    value: Value,
+    is_vector: bool,
+
+    pub fn init(env: Env, v: Value) ?Sequence {
+        if (env.isVector(v)) {
+            return .{ .env = env, .value = v, .is_vector = true };
+        } else if (env.isList(v)) {
+            return .{ .env = env, .value = v, .is_vector = false };
+        }
+        return null;
+    }
+
+    pub fn len(self: Sequence) !usize {
+        if (self.is_vector) {
+            const size = self.env.vectorSize(self.value);
+            return if (size > 0) @intCast(size) else 0;
+        } else {
+            return self.env.listLength(self.value);
+        }
+    }
+
+    pub fn toSlice(self: Sequence, allocator: std.mem.Allocator) ![]Value {
+        if (self.is_vector) {
+            const size = self.len() catch 0;
+            const slice = try allocator.alloc(Value, size);
+            for (0..size) |i| {
+                slice[i] = self.env.vectorGet(self.value, @intCast(i));
+            }
+            return slice;
+        } else {
+            return self.env.extractList(allocator, self.value);
+        }
+    }
+};
+
+/// Type-safe container for an Emacs user pointer wrapping a native struct.
+pub fn UserPointer(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        env: Env,
+        value: Value,
+
+        pub fn init(env: Env, v: Value) ?Self {
+            if (!env.isUserPointer(v)) return null;
+            return .{ .env = env, .value = v };
+        }
+
+        pub fn create(env: Env, ptr: *T, comptime finalizer: ?*const fn (*T) void) Self {
+            const v = env.makeUserPointer(T, ptr, finalizer);
+            return .{ .env = env, .value = v };
+        }
+
+        pub fn get(self: Self) ?*T {
+            return self.env.getUserPointer(T, self.value);
+        }
+
+        pub fn getChecked(self: Self, magic: u64) ?*T {
+            const ptr = self.get() orelse return null;
+            if (@hasField(T, "magic_value")) {
+                if (ptr.magic_value != magic) return null;
+            }
+            return ptr;
+        }
+
+        pub fn deinit(self: Self) void {
+            self.env.setUserPointer(T, self.value, null);
+        }
+    };
+}
 
 /// Borrowed handle to the current Emacs execution environment.
 pub const Env = struct {
@@ -234,13 +412,13 @@ pub const Env = struct {
     pub fn funcall(
         self: Env,
         function_name: [:0]const u8,
-        args: []Value,
+        args: []const Value,
     ) FuncallError!Value {
         const value = self.inner.funcall.?(
             self.inner,
             self.intern(function_name),
             @intCast(args.len),
-            args.ptr,
+            @constCast(args.ptr),
         );
         return switch (self.nonLocalExitCheck()) {
             .@"return" => value,
@@ -316,6 +494,167 @@ pub const Env = struct {
     /// Returns the Emacs type of a value.
     pub fn typeOf(self: Env, v: Value) Value {
         return self.inner.type_of.?(self.inner, v);
+    }
+
+    /// Returns the Emacs type of a value as a Zig enum.
+    pub fn getType(self: Env, v: Value) Type {
+        if (self.isNil(v)) return .nil;
+        const t = self.typeOf(v);
+        if (self.eq(t, self.intern("integer"))) return .integer;
+        if (self.eq(t, self.intern("float"))) return .float;
+        if (self.eq(t, self.intern("string"))) return .string;
+        if (self.eq(t, self.intern("symbol"))) return .symbol;
+        if (self.eq(t, self.intern("vector"))) return .vector;
+        if (self.eq(t, self.intern("cons"))) return .cons;
+        if (self.eq(t, self.intern("user-ptr"))) return .user_ptr;
+        if (self.eq(t, self.intern("function"))) return .function;
+        return .other;
+    }
+
+    /// Converts a Zig boolean into Emacs t or nil.
+    pub fn boolean(self: Env, b: bool) Value {
+        return if (b) self.t else self.nil;
+    }
+
+    /// Formats a string with arguments and returns it as an Emacs string value.
+    pub fn formatString(
+        self: Env,
+        allocator: std.mem.Allocator,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) !Value {
+        const msg = try std.fmt.allocPrintSentinel(allocator, fmt, args, 0);
+        defer allocator.free(msg);
+        return self.makeString(msg);
+    }
+
+    /// Wraps a value as a Vector struct if it is a vector.
+    pub fn toVector(self: Env, v: Value) ?Vector {
+        return Vector.init(self, v);
+    }
+
+    /// Wraps a value as a List struct if it is a list.
+    pub fn toList(self: Env, v: Value) ?List {
+        return List.init(self, v);
+    }
+
+    /// Wraps a value as a Sequence struct if it is a vector or list.
+    pub fn toSequence(self: Env, v: Value) ?Sequence {
+        return Sequence.init(self, v);
+    }
+
+    /// Wraps a value as a typed UserPointer container.
+    pub fn toUserPointer(self: Env, comptime T: type, v: Value) ?UserPointer(T) {
+        return UserPointer(T).init(self, v);
+    }
+
+    /// Returns whether the value is nil.
+    pub fn isNil(self: Env, v: Value) bool {
+        return self.eq(v, self.nil);
+    }
+
+    /// Returns whether the value is an integer.
+    pub fn isInteger(self: Env, v: Value) bool {
+        return self.eq(self.typeOf(v), self.intern("integer"));
+    }
+
+    /// Returns whether the value is a float.
+    pub fn isFloat(self: Env, v: Value) bool {
+        return self.eq(self.typeOf(v), self.intern("float"));
+    }
+
+    /// Returns whether the value is a number (integer or float).
+    pub fn isNumber(self: Env, v: Value) bool {
+        const t = self.typeOf(v);
+        return self.eq(t, self.intern("integer")) or self.eq(t, self.intern("float"));
+    }
+
+    /// Returns whether the value is a string.
+    pub fn isString(self: Env, v: Value) bool {
+        return self.eq(self.typeOf(v), self.intern("string"));
+    }
+
+    /// Returns whether the value is a symbol.
+    pub fn isSymbol(self: Env, v: Value) bool {
+        return self.eq(self.typeOf(v), self.intern("symbol"));
+    }
+
+    /// Returns whether the value is a vector.
+    pub fn isVector(self: Env, v: Value) bool {
+        return self.eq(self.typeOf(v), self.intern("vector"));
+    }
+
+    /// Returns whether the value is a user pointer.
+    pub fn isUserPointer(self: Env, v: Value) bool {
+        return self.eq(self.typeOf(v), self.intern("user-ptr"));
+    }
+
+    /// Returns whether the value is a cons cell.
+    pub fn isCons(self: Env, v: Value) bool {
+        return self.eq(self.typeOf(v), self.intern("cons"));
+    }
+
+    /// Returns whether the value is a list (cons cell or nil).
+    pub fn isList(self: Env, v: Value) bool {
+        return self.isNil(v) or self.isCons(v);
+    }
+
+    /// Creates a cons cell (car . cdr).
+    pub fn cons(self: Env, car_val: Value, cdr_val: Value) FuncallError!Value {
+        var args = [_]Value{ car_val, cdr_val };
+        return self.funcall("cons", &args);
+    }
+
+    /// Returns the car of a cons cell.
+    pub fn car(self: Env, cons_cell: Value) FuncallError!Value {
+        var args = [_]Value{cons_cell};
+        return self.funcall("car", &args);
+    }
+
+    /// Returns the cdr of a cons cell.
+    pub fn cdr(self: Env, cons_cell: Value) FuncallError!Value {
+        var args = [_]Value{cons_cell};
+        return self.funcall("cdr", &args);
+    }
+
+    /// Creates an Emacs list from a slice of Values.
+    pub fn makeList(self: Env, values: []const Value) FuncallError!Value {
+        var result = self.nil;
+        var i = values.len;
+        while (i > 0) {
+            i -= 1;
+            result = try self.cons(values[i], result);
+        }
+        return result;
+    }
+
+    /// Extracts all elements of an Emacs list into a slice owned by allocator.
+    pub fn extractList(self: Env, allocator: std.mem.Allocator, list_val: Value) ![]Value {
+        var result = std.ArrayList(Value).empty;
+        defer result.deinit(allocator);
+
+        var cur = list_val;
+        while (self.isNotNil(cur)) {
+            if (!self.isCons(cur)) {
+                return error.InvalidList;
+            }
+            const item = try self.car(cur);
+            try result.append(allocator, item);
+            cur = try self.cdr(cur);
+        }
+        return result.toOwnedSlice(allocator);
+    }
+
+    /// Computes the length of an Emacs list.
+    pub fn listLength(self: Env, list_val: Value) !usize {
+        var count: usize = 0;
+        var cur = list_val;
+        while (self.isNotNil(cur)) {
+            if (!self.isCons(cur)) return error.InvalidList;
+            count += 1;
+            cur = try self.cdr(cur);
+        }
+        return count;
     }
 
     /// Registers a fixed-arity Zig function as an Emacs function.
