@@ -205,12 +205,18 @@ This repository includes practical plugins in [[file:plugins/][plugins/]] demons
 |---|---|---|
 | [[file:plugins/zig-fuzzy/README.md][zig-fuzzy]] | ~plugins/zig-fuzzy/~ | High-performance fuzzy matching & candidate sorting for completion |
 | [[file:plugins/zig-shelf/README.md][zig-shelf]] | ~plugins/zig-shelf/~ | In-memory KV cache with native async thread streaming via ~openChannel~ |
+| [[file:plugins/zig-sqlite/README.md][zig-sqlite]] | ~plugins/zig-sqlite/~ | Embedded SQLite database aligned with Emacs 29+ builtin APIs and polyfill support |
 
 * Development & Testing
 
 #+begin_src bash
-# Build all modules (zig-example, zig-fuzzy, zig-shelf)
+# Build core modules (zig-example, zig-fuzzy, zig-shelf)
 make build
+
+# Build all modules including the optional zig-sqlite plugin
+make build-all
+# Or directly with Zig:
+zig build -Denable-sqlite=true
 
 # Run all test suites (module ERT tests + plugin ERT tests + Zig unit tests)
 make test

@@ -9,4 +9,11 @@
         "build.zig",
         "build.zig.zon",
     },
+    .dependencies = .{
+        .sqlite = .{
+            .url = "git+https://github.com/nDimensional/zig-sqlite.git#3530400",
+            .hash = "sqlite-0.5.0-3530400-djiKTsSWAACNHCdrLkfWz3lizwThl8rpAWJIKP90TIeI",
+            .lazy = true,
+        },
+    },
 }

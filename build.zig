@@ -68,7 +68,33 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(shelf_lib);
 
-    // 4. Native unit tests for plugins
+    // 4. Optional zig-sqlite plugin module (lazy dependency)
+    const enable_sqlite = b.option(bool, "enable-sqlite", "Build zig-sqlite plugin module") orelse false;
+    if (enable_sqlite) {
+        if (b.lazyDependency("sqlite", .{
+            .target = target,
+            .optimize = optimize,
+        })) |sqlite_dep| {
+            const sqlite_module = sqlite_dep.module("sqlite");
+            const sqlite_lib = b.addLibrary(.{
+                .linkage = .dynamic,
+                .name = "zig-sqlite",
+                .use_llvm = true,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("plugins/zig-sqlite/main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "emacs", .module = module },
+                        .{ .name = "sqlite", .module = sqlite_module },
+                    },
+                }),
+            });
+            b.installArtifact(sqlite_lib);
+        }
+    }
+
+    // 5. Native unit tests for plugins
     const matcher_test = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("plugins/zig-fuzzy/matcher.zig"),
