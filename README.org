@@ -1,38 +1,56 @@
 #+TITLE: Zig-emacs
 #+DATE: 2023-12-24T12:27:53+0800
-#+LASTMOD: 2026-11-08T00:12:00+0800
+#+LASTMOD: 2026-11-14T11:50:30+0800
 #+OPTIONS: toc:nil num:nil
 
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml/badge.svg]]
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/lisp-ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/lisp-ci.yml/badge.svg]]
 [[https://img.shields.io/badge/zig%20version-0.17.0-blue.svg]]
 
-Zig binding for Emacs's [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Writing-Dynamic-Modules.html][dynamic modules]].
+~zig-emacs~ provides idiomatic, high-performance Zig bindings for GNU Emacs [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Writing-Dynamic-Modules.html][dynamic modules]].
+
+* Features
+
+- *Zero Header Setup*: Automatically translates bundled ~include/emacs-module.h~ via Zig's ~addTranslateC~ during build.
+- *Type-safe User Pointers*: Wrap arbitrary Zig structs with typed helpers and automatic finalizers tied to Emacs GC.
+- *Non-blocking Async Streaming*: Send streaming data from native background threads directly into Emacs ~make-pipe-process~ via ~openChannel~ without blocking the editor UI.
+- *Idiomatic Error Handling*: Seamless mapping between Zig error unions and Emacs non-local exits (~signal~ and ~throw~).
 
 * Requirements
 
-- Zig 0.17.0
+- Zig 0.17.0 or newer
 - GNU Emacs 28 or newer
-- A C compiler supported by Zig
 
-The project translates ~include/emacs-module.h~ during the build, so Emacs
-headers do not need to be installed separately.
+* Installation
 
-* Docs
+Add ~zig-emacs~ to your ~build.zig.zon~:
 
-See https://jiacai2050.github.io/zig-emacs/
+#+begin_src bash
+# Latest commit
+zig fetch --save git+https://github.com/jiacai2050/zig-emacs.git
 
-* Minimal example
+# Tagged release
+zig fetch --save git+https://github.com/jiacai2050/zig-emacs.git#v0.3.0
+#+end_src
 
-Every module must call ~module_init~ at comptime and provide an ~init~
-function. Registered functions take ~emacs.Env~ as their first argument and
-return ~emacs.Value~ or ~!emacs.Value~.
+Then import it in your ~build.zig~:
+
+#+begin_src zig
+const emacs_dep = b.dependency("emacs", .{
+    .target = target,
+    .optimize = optimize,
+});
+module.addImport("emacs", emacs_dep.module("emacs"));
+#+end_src
+
+* Quickstart
+
+Every module must call ~module_init~ at comptime and provide an ~init~ function. Registered functions accept ~emacs.Env~ as their first argument and return ~emacs.Value~ or ~!emacs.Value~.
 
 #+begin_src zig
 const std = @import("std");
 const emacs = @import("emacs");
 
-// Every module needs to call `module_init` in order to register with Emacs.
 comptime {
     emacs.module_init(@This());
 }
@@ -47,15 +65,17 @@ pub fn init(env: emacs.Env) c_int {
     env.makeFunction(
         "zig-add",
         add,
-        .{ .doc_string = "Add two integers." },
+        .{
+            .doc_string = "Add two integers.",
+            .interactive_spec = "nFirst number: \nnSecond number: ",
+        },
     ) catch return 1;
 
     return 0;
 }
 #+end_src
 
-Compile [[file:example.zig][this example]] with ~zig build~, then load it into
-Emacs:
+Build the module and load it in Emacs:
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/zig-emacs/zig-out/lib/")
@@ -63,32 +83,11 @@ Emacs:
 (zig-add 1 2)
 #+end_src
 
-The exact shared-library suffix depends on the target platform.
+* Core Guides
 
-* Build
+** Allocator Context & User Data
 
-Build the example module:
-
-#+begin_src sh
-make build
-#+end_src
-
-The dynamic library is written to ~zig-out/lib/~. Run the tests with:
-
-#+begin_src sh
-make test
-#+end_src
-
-Check formatting with:
-
-#+begin_src sh
-make lint
-#+end_src
-
-* Allocator context
-
-Allocators are not stored inside ~Env~. Pass module state through
-~FuncContext.user_data~ and retrieve it with ~getUserData~:
+Emacs ~Env~ does not manage memory allocators. Pass application state via ~FuncContext.user_data~ and retrieve it with ~getUserData~:
 
 #+begin_src zig
 const ModuleContext = struct {
@@ -100,9 +99,7 @@ var module_context: ModuleContext = .{
 };
 
 fn greeting(env: emacs.Env, value: emacs.Value) !emacs.Value {
-    const context = env.getUserData(ModuleContext) orelse {
-        return error.MissingModuleContext;
-    };
+    const context = env.getUserData(ModuleContext) orelse return error.MissingModuleContext;
     const text = try env.extractString(context.gpa, value);
     defer context.gpa.free(text);
     return env.makeString(text);
@@ -118,10 +115,11 @@ pub fn init(env: emacs.Env) c_int {
 }
 #+end_src
 
-* Typed user pointers
+[[file:screenshot.jpg]]
 
-Use the typed user pointer API instead of casting ~*anyopaque~ in application
-code:
+** Typed User Pointers
+
+Bind native state directly to Emacs Lisp values with optional garbage-collection finalizers:
 
 #+begin_src zig
 const Resource = struct {
@@ -139,88 +137,95 @@ fn makeResource(env: emacs.Env, gpa: std.mem.Allocator) !emacs.Value {
 }
 
 fn useResource(env: emacs.Env, value: emacs.Value) emacs.Value {
-    const resource = env.getUserPointer(Resource, value) orelse {
-        return env.nil;
-    };
+    const resource = env.getUserPointer(Resource, value) orelse return env.nil;
     _ = resource;
     return env.t;
 }
 #+end_src
 
-The finalizer is optional. Pass ~null~ for a borrowed pointer that must not be
-freed by Emacs:
+Pass ~null~ as the finalizer callback for unmanaged or borrowed pointers.
+
+** Calling Emacs Functions & Error Handling
+
+Invoke any Emacs Lisp function with ~Env.funcall~, which automatically detects signals and throws:
 
 #+begin_src zig
-const value = env.makeUserPointer(Config, config, null);
-#+end_src
-
-The pointed-to object must remain valid until Emacs runs its finalizer.
-
-* Calling Emacs functions
-
-~Env.funcall~ returns ~FuncallError!Value~ and reports Emacs signals and
-throws:
-
-#+begin_src zig
-var args = [_]emacs.Value{env.makeString("hello")};
+var args = [_]emacs.Value{env.makeString("Hello from Zig!")};
 const result = try env.funcall("message", &args);
 #+end_src
 
-Use ~env.message~, ~env.signal~, and ~env.reportError~ when their dedicated
-helpers are more expressive.
+Convenience wrappers are available:
+- ~env.message(str)~: Print directly to the echo area / ~*Messages*~ buffer.
+- ~env.reportError(prefix, err)~: Call the Emacs ~error~ function.
+- ~env.signal(err, args)~: Raise an Emacs signal from a Zig error.
 
-* Pipe channel example
+** Non-blocking Async Streaming
 
-~openChannel~ connects native code to an Emacs ~make-pipe-process~. The Zig
-function writes to the process filter and closes the channel when it returns:
+~openChannel~ binds native code to the write end of an Emacs ~make-pipe-process~. This allows background threads to stream results without locking the main Emacs UI:
 
 #+begin_src emacs-lisp
 (let ((process
        (make-pipe-process
-        :name "zig-channel"
-        :filter (lambda (_process output)
-                  (message "Zig says: %s" (string-trim output))))))
-  (zig-send-to-channel process "hello from Zig"))
+        :name "zig-stream"
+        :buffer nil
+        :filter (lambda (_proc chunk)
+                  (message "Received: %s" chunk)))))
+  (zig-start-stream process))
 #+end_src
 
-The corresponding module function is:
+On the Zig side:
 
 #+begin_src zig
-fn sendToChannel(
-    env: emacs.Env,
-    process_value: emacs.Value,
-    message_value: emacs.Value,
-) !emacs.Value {
-    const context = env.getUserData(ModuleContext) orelse {
-        return error.MissingModuleContext;
-    };
-    var channel = try env.openChannel(process_value);
-    defer channel.deinit() catch |err| {
-        std.log.err("failed to close Emacs channel: {s}", .{@errorName(err)});
-    };
+const Worker = struct {
+    channel: emacs.Channel,
 
-    const message = try env.extractString(context.gpa, message_value);
-    defer context.gpa.free(message);
-    try channel.write(message);
-    try channel.write("\n");
+    fn run(self: *Worker) void {
+        defer {
+            var ch = self.channel;
+            ch.deinit() catch {};
+        }
+        // Writes run concurrently in a background thread
+        self.channel.write("part 1\n") catch return;
+        self.channel.write("part 2\n") catch return;
+    }
+};
+
+fn startStream(env: emacs.Env, proc_val: emacs.Value) !emacs.Value {
+    const channel = try env.openChannel(proc_val);
+    // Move channel into background worker thread...
     return env.t;
 }
 #+end_src
 
-For long-running work, move the owned ~Channel~ into a background thread and
-call ~deinit~ in that thread after the final write.
+* Included Plugins
 
-[[file:screenshot.jpg]]
+This repository includes practical plugins in [[file:plugins/][plugins/]] demonstrating real-world usage:
 
-* Usage
+| Plugin | Path | Description |
+|---|---|---|
+| [[file:plugins/zig-fuzzy/README.md][zig-fuzzy]] | ~plugins/zig-fuzzy/~ | High-performance fuzzy matching & candidate sorting for completion |
+| [[file:plugins/zig-shelf/README.md][zig-shelf]] | ~plugins/zig-shelf/~ | In-memory KV cache with native async thread streaming via ~openChannel~ |
+
+* Development & Testing
 
 #+begin_src bash
-# Latest version
-zig fetch --save git+https://github.com/jiacai2050/zig-emacs.git
+# Build all modules (zig-example, zig-fuzzy, zig-shelf)
+make build
 
-# Tagged version
-zig fetch --save git+https://github.com/jiacai2050/zig-emacs.git#v0.3.0
+# Run all test suites (module ERT tests + plugin ERT tests + Zig unit tests)
+make test
+
+# Format and lint code
+make lint
+
+# Generate documentation
+make docs
 #+end_src
 
+* Docs
+
+API documentation: https://jiacai2050.github.io/zig-emacs/
+
 * License
-[[./LICENSE][MIT]]
+
+[[file:LICENSE][MIT]]

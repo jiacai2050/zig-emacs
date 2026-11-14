@@ -20,7 +20,8 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const exe = b.addLibrary(.{
+    // 1. Example dynamic module
+    const example_lib = b.addLibrary(.{
         .linkage = .dynamic,
         .name = "zig-example",
         .use_llvm = true,
@@ -33,8 +34,64 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(exe);
+    b.installArtifact(example_lib);
 
+    // 2. zig-fuzzy plugin module
+    const fuzzy_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "zig-fuzzy",
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("plugins/zig-fuzzy/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "emacs", .module = module },
+            },
+        }),
+    });
+    b.installArtifact(fuzzy_lib);
+
+    // 3. zig-shelf plugin module
+    const shelf_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "zig-shelf",
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("plugins/zig-shelf/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "emacs", .module = module },
+            },
+        }),
+    });
+    b.installArtifact(shelf_lib);
+
+    // 4. Native unit tests for plugins
+    const matcher_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("plugins/zig-fuzzy/matcher.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_matcher_test = b.addRunArtifact(matcher_test);
+
+    const storage_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("plugins/zig-shelf/storage.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_storage_test = b.addRunArtifact(storage_test);
+
+    const unit_test_step = b.step("test-unit", "Run native Zig unit tests");
+    unit_test_step.dependOn(&run_matcher_test.step);
+    unit_test_step.dependOn(&run_storage_test.step);
+
+    // 5. Documentation
     const doc_object = b.addObject(.{
         .name = "docs",
         .root_module = module,
