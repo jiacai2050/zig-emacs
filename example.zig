@@ -190,7 +190,8 @@ pub fn init(env: emacs.Env) c_int {
         "zig-test-list-ops",
         struct {
             fn testListOps(env_arg: emacs.Env, val: emacs.Value) !emacs.Value {
-                const context = env_arg.getUserData(ModuleContext) orelse return error.MissingModuleContext;
+                const context = env_arg.getUserData(ModuleContext) orelse
+                    return error.MissingModuleContext;
                 const len = try env_arg.listLength(val);
                 const items = try env_arg.extractList(context.gpa, val);
                 defer context.gpa.free(items);
@@ -242,7 +243,8 @@ pub fn init(env: emacs.Env) c_int {
         "zig-test-sequence",
         struct {
             fn testSequence(env_arg: emacs.Env, val: emacs.Value) !emacs.Value {
-                const context = env_arg.getUserData(ModuleContext) orelse return error.MissingModuleContext;
+                const context = env_arg.getUserData(ModuleContext) orelse
+                    return error.MissingModuleContext;
                 const seq = env_arg.toSequence(val) orelse return env_arg.nil;
                 const items = try seq.toSlice(context.gpa);
                 defer context.gpa.free(items);
@@ -256,6 +258,138 @@ pub fn init(env: emacs.Env) c_int {
             .doc_string = "Test Sequence abstraction by converting to Vector.",
             .user_data = @ptrCast(&module_context),
         },
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-plist",
+        struct {
+            fn testPlist(env_arg: emacs.Env) !emacs.Value {
+                return env_arg.makePlist(.{
+                    .name = "zig-emacs",
+                    .version = @as(i64, 17),
+                    .active = true,
+                });
+            }
+        }.testPlist,
+        .{},
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-alist",
+        struct {
+            fn testAlist(env_arg: emacs.Env) !emacs.Value {
+                return env_arg.makeAlist(.{
+                    .name = "zig-emacs",
+                    .version = @as(i64, 17),
+                    .active = true,
+                });
+            }
+        }.testAlist,
+        .{},
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-optional",
+        struct {
+            fn testOptional(env_arg: emacs.Env, a: emacs.Value, b: emacs.Value) emacs.Value {
+                const a_val = env_arg.extractInteger(a);
+                const b_val = if (env_arg.isNil(b)) 100 else env_arg.extractInteger(b);
+                return env_arg.makeInteger(a_val + b_val);
+            }
+        }.testOptional,
+        .{
+            .min_args = 1,
+            .max_args = 2,
+        },
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-signal",
+        struct {
+            fn testSignal(env_arg: emacs.Env) emacs.Value {
+                env_arg.signalSymbol("zig-error", env_arg.makeString("test error message"));
+                return env_arg.nil;
+            }
+        }.testSignal,
+        .{},
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-auto-return",
+        struct {
+            fn testAutoReturn(env_arg: emacs.Env, a: emacs.Value, b: emacs.Value) i64 {
+                return env_arg.extractInteger(a) * 10 + env_arg.extractInteger(b);
+            }
+        }.testAutoReturn,
+        .{},
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-auto-list",
+        struct {
+            fn testAutoList(env_arg: emacs.Env) !emacs.Value {
+                return env_arg.list(.{
+                    @as(i64, 42),
+                    "automatic conversion",
+                    true,
+                });
+            }
+        }.testAutoList,
+        .{},
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-auto-vector",
+        struct {
+            fn testAutoVector(env_arg: emacs.Env) !emacs.Value {
+                return env_arg.vector(.{
+                    @as(i64, 100),
+                    "vector conversion",
+                    false,
+                });
+            }
+        }.testAutoVector,
+        .{},
+    ) catch return 1;
+
+    env.makeFunction(
+        "zig-test-native-args",
+        struct {
+            fn testNativeArgs(env_arg: emacs.Env, a: i64, b: i64, opt: ?i64) i64 {
+                _ = env_arg;
+                return a + b + (opt orelse 1000);
+            }
+        }.testNativeArgs,
+        .{
+            .min_args = 2,
+            .max_args = 3,
+        },
+    ) catch return 1;
+
+    const ServerConfig = struct {
+        host: []const u8 = "localhost",
+        port: i32 = 8080,
+        verbose: bool = false,
+        token: ?[]const u8 = null,
+    };
+
+    env.makeFunction(
+        "zig-test-from-plist",
+        struct {
+            fn testFromPlist(env_arg: emacs.Env, plist: emacs.Value) !emacs.Value {
+                var arena = env_arg.arena(std.heap.page_allocator);
+                defer arena.deinit();
+
+                const cfg = try env_arg.fromPlist(ServerConfig, plist, arena.allocator());
+                return env_arg.list(.{
+                    cfg.host,
+                    @as(i64, cfg.port),
+                    cfg.verbose,
+                    cfg.token orelse "no-token",
+                });
+            }
+        }.testFromPlist,
+        .{},
     ) catch return 1;
 
     return 0;

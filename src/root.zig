@@ -63,6 +63,83 @@ pub const Channel = struct {
         }
     }
 
+    /// Formats and writes directly to the channel using a 1024-byte stack buffer (zero allocation).
+    pub fn print(
+        self: Channel,
+        comptime format: []const u8,
+        args: anytype,
+    ) (ChannelError || error{FormatError})!void {
+        var buffer: [1024]u8 = undefined;
+        const message = std.fmt.bufPrint(&buffer, format, args) catch return error.FormatError;
+        return self.write(message);
+    }
+
+    /// Converts this Channel into a standard `std.Io.File`.
+    pub fn toFile(self: Channel) std.Io.File {
+        return .{
+            .handle = @intCast(self.file_descriptor),
+            .flags = .{ .nonblocking = false },
+        };
+    }
+
+    /// Adapts Channel to the standard Zig 0.17 `std.Io.Writer` interface.
+    pub const IoWriter = struct {
+        channel: Channel,
+        writer: std.Io.Writer,
+
+        pub fn init(channel: Channel, buffer: []u8) IoWriter {
+            std.debug.assert(buffer.len > 0);
+            return .{
+                .channel = channel,
+                .writer = .{
+                    .vtable = &.{
+                        .drain = drain,
+                    },
+                    .buffer = buffer,
+                },
+            };
+        }
+
+        fn drain(
+            w: *std.Io.Writer,
+            data: []const []const u8,
+            splat: usize,
+        ) std.Io.Writer.Error!usize {
+            const self: *IoWriter = @alignCast(@fieldParentPtr("writer", w));
+            if (w.end > 0) {
+                self.channel.write(w.buffer[0..w.end]) catch return error.WriteFailed;
+                w.end = 0;
+            }
+            var total: usize = 0;
+            if (data.len > 0) {
+                const slice = data[0 .. data.len - 1];
+                for (slice) |chunk| {
+                    if (chunk.len > 0) {
+                        self.channel.write(chunk) catch return error.WriteFailed;
+                        total += chunk.len;
+                    }
+                }
+                const pattern = data[slice.len];
+                var i: usize = 0;
+                while (i < splat) : (i += 1) {
+                    if (pattern.len > 0) {
+                        self.channel.write(pattern) catch return error.WriteFailed;
+                        total += pattern.len;
+                    }
+                }
+            }
+            return total;
+        }
+    };
+
+    /// Returns a standard Zig 0.17 `std.Io.Writer` adapter backed by this channel.
+    pub fn writer(self: Channel, buffer: []u8) IoWriter {
+        return IoWriter.init(self, buffer);
+    }
+
+    /// Alias for `writer` to return a standard `std.Io.Writer` adapter.
+    pub const ioWriter = writer;
+
     /// Releases the channel and closes its native file descriptor.
     pub fn deinit(self: *Channel) ChannelError!void {
         if (self.file_descriptor < 0) {
@@ -113,6 +190,10 @@ pub const FuncContext = struct {
     interactive_spec: ?[:0]const u8 = null,
     /// Opaque module context passed to the function callback.
     user_data: ?*anyopaque = null,
+    /// Minimum required arguments (defaults to non-optional parameter count).
+    min_args: ?Index = null,
+    /// Maximum allowed arguments (defaults to total parameter count).
+    max_args: ?Index = null,
 };
 
 /// Result of checking whether an Emacs function returned, signaled, or threw.
@@ -330,6 +411,7 @@ pub const Env = struct {
     t: Value,
 
     fn init(env: *c.emacs_env, user_data: ?*anyopaque) Env {
+        std.debug.assert(env.intern != null);
         return .{
             .inner = env,
             .user_data = user_data,
@@ -339,9 +421,9 @@ pub const Env = struct {
     }
 
     // C type to Emacs.
-    /// Creates an Emacs string from a null-terminated UTF-8 string.
-    pub fn makeString(self: Env, input: [:0]const u8) Value {
-        return self.inner.make_string.?(self.inner, input, @intCast(input.len));
+    /// Creates an Emacs string from a UTF-8 slice.
+    pub fn makeString(self: Env, input: []const u8) Value {
+        return self.inner.make_string.?(self.inner, input.ptr, @intCast(input.len));
     }
 
     /// Creates an Emacs unibyte string from arbitrary bytes.
@@ -396,6 +478,12 @@ pub const Env = struct {
     /// Interns a null-terminated symbol name in Emacs.
     pub fn intern(self: Env, symbol: [:0]const u8) Value {
         return self.inner.intern.?(self.inner, symbol);
+    }
+
+    /// Interns a runtime UTF-8 string slice by delegating to Emacs `intern`.
+    pub fn internSlice(self: Env, symbol: []const u8) FuncallError!Value {
+        const str_val = self.makeString(symbol);
+        return self.funcall("intern", &.{str_val});
     }
 
     /// Returns whether an Emacs value is not nil.
@@ -484,6 +572,254 @@ pub const Env = struct {
     /// Releases a global reference created by makeGlobalRef.
     pub fn freeGlobalRef(self: Env, value: Value) void {
         self.inner.free_global_ref.?(self.inner, value);
+    }
+
+    /// Automatically converts a primitive Zig value (integer, float, bool, string/slice,
+    /// optional, or existing Value) into an Emacs Value without error handling overhead.
+    pub fn toValue(self: Env, val: anytype) Value {
+        const T = @TypeOf(val);
+        if (T == Value) return val;
+
+        const info = @typeInfo(T);
+        switch (info) {
+            .int => return self.makeInteger(@intCast(val)),
+            .float => return self.makeFloat(@floatCast(val)),
+            .bool => return self.boolean(val),
+            .optional => {
+                if (val) |unwrapped| {
+                    return self.toValue(unwrapped);
+                } else {
+                    return self.nil;
+                }
+            },
+            .pointer => |ptr_info| {
+                switch (ptr_info.size) {
+                    .slice => {
+                        if (ptr_info.child == u8) {
+                            return self.makeString(val);
+                        }
+                    },
+                    .one => {
+                        const child_info = @typeInfo(ptr_info.child);
+                        if (child_info == .array and child_info.array.child == u8) {
+                            return self.makeString(val);
+                        }
+                        return self.toValue(val.*);
+                    },
+                    else => {},
+                }
+                @compileError(
+                    "toValue only supports byte slices/strings and single pointers, found: " ++
+                        @typeName(T),
+                );
+            },
+            .array => |arr_info| {
+                if (arr_info.child == u8) {
+                    return self.makeString(&val);
+                }
+                @compileError("toValue only supports byte arrays/strings, found: " ++ @typeName(T));
+            },
+            .null => return self.nil,
+            else => @compileError("Unsupported type for toValue: " ++ @typeName(T)),
+        }
+    }
+
+    /// Creates an Emacs list from a tuple of arbitrary Zig values, automatically converting
+    /// each element via `toValue`.
+    pub fn list(self: Env, values: anytype) FuncallError!Value {
+        const T = @TypeOf(values);
+        const info = @typeInfo(T);
+        if (info != .@"struct" or !info.@"struct".is_tuple) {
+            @compileError("env.list expects a tuple of values, found " ++ @typeName(T));
+        }
+
+        const field_names = info.@"struct".field_names;
+        var items: [field_names.len]Value = undefined;
+        inline for (field_names, 0..) |field_name, index| {
+            items[index] = self.toValue(@field(values, field_name));
+        }
+        return self.funcall("list", &items);
+    }
+
+    /// Creates an Emacs vector from a tuple of arbitrary Zig values, automatically converting
+    /// each element via `toValue`.
+    pub fn vector(self: Env, values: anytype) FuncallError!Value {
+        const T = @TypeOf(values);
+        const info = @typeInfo(T);
+        if (info != .@"struct" or !info.@"struct".is_tuple) {
+            @compileError("env.vector expects a tuple of values, found " ++ @typeName(T));
+        }
+
+        const field_names = info.@"struct".field_names;
+        var items: [field_names.len]Value = undefined;
+        inline for (field_names, 0..) |field_name, index| {
+            items[index] = self.toValue(@field(values, field_name));
+        }
+        return self.funcall("vector", &items);
+    }
+
+    /// Converts a Zig struct to an Emacs property list (:field value ...).
+    pub fn makePlist(self: Env, val: anytype) FuncallError!Value {
+        const T = @TypeOf(val);
+        const info = @typeInfo(T);
+        if (info != .@"struct") {
+            @compileError("makePlist expects a struct or tuple, found " ++ @typeName(T));
+        }
+
+        const field_names = info.@"struct".field_names;
+        var plist_args: [field_names.len * 2]Value = undefined;
+        inline for (field_names, 0..) |field_name, i| {
+            const keyword_name = comptime if (std.mem.startsWith(u8, field_name, ":"))
+                field_name
+            else
+                ":" ++ field_name;
+            plist_args[i * 2] = self.intern(keyword_name);
+            plist_args[i * 2 + 1] = self.toValue(@field(val, field_name));
+        }
+        return self.funcall("list", &plist_args);
+    }
+
+    /// Converts a Zig struct to an Emacs association list ((field . value) ...).
+    pub fn makeAlist(self: Env, val: anytype) FuncallError!Value {
+        const T = @TypeOf(val);
+        const info = @typeInfo(T);
+        if (info != .@"struct") {
+            @compileError("makeAlist expects a struct, found " ++ @typeName(T));
+        }
+
+        const field_names = info.@"struct".field_names;
+        var cons_cells: [field_names.len]Value = undefined;
+        inline for (field_names, 0..) |field_name, i| {
+            const key_sym = self.intern(field_name);
+            const val_v = self.toValue(@field(val, field_name));
+            cons_cells[i] = try self.cons(key_sym, val_v);
+        }
+        return self.funcall("list", &cons_cells);
+    }
+
+    pub const FromValueError = error{
+        WrongTypeArgument,
+        StringExtractFailed,
+        MissingRequiredField,
+    };
+
+    /// Converts an Emacs Value into a native Zig value (int, float, bool, slice, optional,
+    /// or Value). If allocator is null, string/slice extraction will fail.
+    pub fn fromValue(
+        self: Env,
+        comptime T: type,
+        value: Value,
+        allocator: ?std.mem.Allocator,
+    ) (FromValueError || error{OutOfMemory})!T {
+        if (T == Value) return value;
+
+        const info = @typeInfo(T);
+        switch (info) {
+            .int => {
+                if (!self.isInteger(value)) return error.WrongTypeArgument;
+                return @intCast(self.extractInteger(value));
+            },
+            .float => {
+                if (self.isFloat(value)) {
+                    return @floatCast(self.extractFloat(value));
+                }
+                if (self.isInteger(value)) {
+                    return @floatFromInt(self.extractInteger(value));
+                }
+                return error.WrongTypeArgument;
+            },
+            .bool => {
+                return self.isNotNil(value);
+            },
+            .optional => |optional_info| {
+                if (self.isNil(value)) return null;
+                return try self.fromValue(optional_info.child, value, allocator);
+            },
+            .pointer => |pointer_info| {
+                if (pointer_info.size == .slice and pointer_info.child == u8) {
+                    if (allocator == null) return error.StringExtractFailed;
+                    if (!self.isString(value)) return error.WrongTypeArgument;
+                    return self.extractString(allocator.?, value) catch error.StringExtractFailed;
+                }
+                @compileError("Unsupported pointer type for fromValue: " ++ @typeName(T));
+            },
+            else => @compileError("Unsupported type for fromValue: " ++ @typeName(T)),
+        }
+    }
+
+    /// Converts an Emacs Value into a native scalar Zig value without requiring an allocator.
+    pub fn fromValueScalar(self: Env, comptime T: type, value: Value) FromValueError!T {
+        return self.fromValue(T, value, null) catch |err| switch (err) {
+            error.OutOfMemory => unreachable,
+            else => |e| e,
+        };
+    }
+
+    /// Deserializes an Emacs property list (:field value ...) into a Zig struct.
+    pub fn fromPlist(
+        self: Env,
+        comptime T: type,
+        plist: Value,
+        allocator: ?std.mem.Allocator,
+    ) !T {
+        const info = @typeInfo(T);
+        if (info != .@"struct") {
+            @compileError("fromPlist expects a struct type, found " ++ @typeName(T));
+        }
+
+        var result: T = undefined;
+        const field_names = info.@"struct".field_names;
+        const field_types = info.@"struct".field_types;
+        const field_attrs = info.@"struct".field_attrs;
+        inline for (field_names, field_types, field_attrs) |name, FieldType, attrs| {
+            const keyword_name = if (name.len > 0) blk: {
+                if (name[0] == ':') {
+                    break :blk name;
+                } else {
+                    break :blk ":" ++ name;
+                }
+            } else ":";
+
+            const key_sym = self.intern(keyword_name);
+            const val_found = try self.funcall("plist-get", &.{ plist, key_sym });
+
+            if (self.isNil(val_found)) {
+                if (attrs.defaultValue(FieldType)) |default_value| {
+                    @field(result, name) = default_value;
+                } else if (@typeInfo(FieldType) == .optional) {
+                    @field(result, name) = null;
+                } else {
+                    return error.MissingRequiredField;
+                }
+            } else {
+                @field(result, name) = try self.fromValue(FieldType, val_found, allocator);
+            }
+        }
+        return result;
+    }
+
+    /// Helper struct providing a scoped arena allocator for temporary allocations within
+    /// a callback.
+    pub const ScopedArena = struct {
+        arena: std.heap.ArenaAllocator,
+
+        pub fn init(backing: std.mem.Allocator) ScopedArena {
+            return .{ .arena = std.heap.ArenaAllocator.init(backing) };
+        }
+
+        pub fn deinit(self: *ScopedArena) void {
+            self.arena.deinit();
+        }
+
+        pub fn allocator(self: *ScopedArena) std.mem.Allocator {
+            return self.arena.allocator();
+        }
+    };
+
+    /// Returns a new ScopedArena backed by the given allocator.
+    pub fn arena(self: Env, backing: std.mem.Allocator) ScopedArena {
+        _ = self;
+        return ScopedArena.init(backing);
     }
 
     /// Returns whether Emacs requested that the callback yield.
@@ -628,13 +964,21 @@ pub const Env = struct {
         return result;
     }
 
+    /// Maximum allowed length when traversing an Emacs list to prevent
+    /// infinite loops on cyclic lists.
+    pub const list_elements_max: usize = 10_000_000;
+
     /// Extracts all elements of an Emacs list into a slice owned by allocator.
     pub fn extractList(self: Env, allocator: std.mem.Allocator, list_val: Value) ![]Value {
         var result = std.ArrayList(Value).empty;
         defer result.deinit(allocator);
 
         var cur = list_val;
-        while (self.isNotNil(cur)) {
+        var count: usize = 0;
+        while (self.isNotNil(cur)) : (count += 1) {
+            if (count >= list_elements_max) {
+                return error.ListTooLongOrCyclic;
+            }
             if (!self.isCons(cur)) {
                 return error.InvalidList;
             }
@@ -649,9 +993,11 @@ pub const Env = struct {
     pub fn listLength(self: Env, list_val: Value) !usize {
         var count: usize = 0;
         var cur = list_val;
-        while (self.isNotNil(cur)) {
+        while (self.isNotNil(cur)) : (count += 1) {
+            if (count >= list_elements_max) {
+                return error.ListTooLongOrCyclic;
+            }
             if (!self.isCons(cur)) return error.InvalidList;
-            count += 1;
             cur = try self.cdr(cur);
         }
         return count;
@@ -676,24 +1022,18 @@ pub const Env = struct {
         if (fn_info.param_types[0] != Env) {
             @compileError("The first Emacs function argument must have type Env");
         }
-        if (fn_info.return_type) |ret_type| {
-            if (ret_type != Value) {
-                switch (@typeInfo(ret_type)) {
-                    .error_union => |err_union| {
-                        if (err_union.payload != Value) {
-                            @compileError("Emacs functions must return Value or !Value");
-                        }
-                    },
-                    else => @compileError("Emacs functions must return Value or !Value"),
-                }
-            }
-        } else {
-            @compileError("Emacs functions must return Value or !Value");
-        }
+        const RawReturnType = fn_info.return_type orelse
+            @compileError("Emacs functions must have a return type");
+        const is_error_union = @typeInfo(RawReturnType) == .error_union;
+        const PayloadType = if (is_error_union)
+            @typeInfo(RawReturnType).error_union.payload
+        else
+            RawReturnType;
 
         // The first function argument is the environment.
-        const min_args: Index = @as(Index, @intCast(fn_info.param_types.len)) - 1;
-        const max_args: Index = min_args;
+        const total_params = fn_info.param_types.len - 1;
+        const min_args: Index = ctx.min_args orelse @intCast(total_params);
+        const max_args: Index = ctx.max_args orelse @intCast(total_params);
         const emacs_fn = self.inner.make_function.?(
             self.inner,
             min_args,
@@ -710,11 +1050,11 @@ pub const Env = struct {
                         return null;
                     }
                     const zig_env = Env.init(e.?, data);
-                    if (nargs != min_args) {
+                    if (nargs > total_params) {
                         std.log.err("Emacs passed an unexpected argument count", .{});
                         return zig_env.nil;
                     }
-                    if (min_args > 0) {
+                    if (nargs > 0) {
                         if (emacs_args == null) {
                             std.log.err("Emacs passed null arguments", .{});
                             return zig_env.nil;
@@ -723,20 +1063,34 @@ pub const Env = struct {
 
                     var args: std.meta.ArgsTuple(@TypeOf(func)) = undefined;
                     args[0] = zig_env;
-                    comptime var i: usize = 0;
-                    inline while (i < min_args) : (i += 1) {
-                        // The first argument is the environment.
-                        args[i + 1] = emacs_args[i];
+                    inline for (0..total_params) |i| {
+                        const ParamType = fn_info.param_types[i + 1].?;
+                        const raw_value = if (i < nargs) emacs_args[i] else zig_env.nil;
+                        if (ParamType == Value) {
+                            args[i + 1] = raw_value;
+                        } else {
+                            const parsed = zig_env.fromValueScalar(ParamType, raw_value);
+                            args[i + 1] = parsed catch |err| {
+                                std.log.debug(
+                                    "invalid argument #{d} for function '{s}', expected {s}: {s}",
+                                    .{ i + 1, name, @typeName(ParamType), @errorName(err) },
+                                );
+                                const error_data = zig_env.list(.{
+                                    zig_env.intern(@typeName(ParamType)),
+                                    raw_value,
+                                }) catch zig_env.nil;
+                                zig_env.signalSymbol("wrong-type-argument", error_data);
+                                return zig_env.nil;
+                            };
+                        }
                     }
 
                     if (zig_env.shouldQuit()) {
                         return zig_env.nil;
                     }
 
-                    return if (fn_info.return_type.? == Value)
-                        @call(.auto, func, args)
-                    else
-                        @call(.auto, func, args) catch |err| {
+                    if (comptime is_error_union) {
+                        const res = @call(.auto, func, args) catch |err| {
                             std.log.err(
                                 "call function failed, func:{s}, err:{any}",
                                 .{ name, err },
@@ -752,6 +1106,23 @@ pub const Env = struct {
                             };
                             return zig_env.nil;
                         };
+                        if (comptime PayloadType == void) {
+                            return zig_env.nil;
+                        } else if (comptime PayloadType == Value) {
+                            return res;
+                        } else {
+                            return zig_env.toValue(res);
+                        }
+                    } else {
+                        const res = @call(.auto, func, args);
+                        if (comptime PayloadType == void) {
+                            return zig_env.nil;
+                        } else if (comptime PayloadType == Value) {
+                            return res;
+                        } else {
+                            return zig_env.toValue(res);
+                        }
+                    }
                 }
             }.makeFunctionCallback,
             @ptrCast(ctx.doc_string),
@@ -826,18 +1197,18 @@ pub const Env = struct {
     }
 
     /// Returns an element from an Emacs vector.
-    pub fn vectorGet(self: Env, vector: Value, index: Index) Value {
-        return self.inner.vec_get.?(self.inner, vector, index);
+    pub fn vectorGet(self: Env, vec: Value, index: Index) Value {
+        return self.inner.vec_get.?(self.inner, vec, index);
     }
 
     /// Replaces an element in an Emacs vector.
-    pub fn vectorSet(self: Env, vector: Value, index: Index, value: Value) void {
-        self.inner.vec_set.?(self.inner, vector, index, value);
+    pub fn vectorSet(self: Env, vec: Value, index: Index, value: Value) void {
+        self.inner.vec_set.?(self.inner, vec, index, value);
     }
 
     /// Returns the number of elements in an Emacs vector.
-    pub fn vectorSize(self: Env, vector: Value) Index {
-        return self.inner.vec_size.?(self.inner, vector);
+    pub fn vectorSize(self: Env, vec: Value) Index {
+        return self.inner.vec_size.?(self.inner, vec);
     }
 
     /// Returns the callback context as the requested type.
@@ -852,7 +1223,13 @@ pub const Env = struct {
         return self.funcall("message", &args);
     }
 
-    /// Signals an error with the supplied Emacs error arguments.
+    /// Signals an Emacs error with a specific interned symbol and data payload.
+    pub fn signalSymbol(self: Env, symbol_name: [:0]const u8, data: Value) void {
+        const symbol = self.intern(symbol_name);
+        self.nonLocalExitSignal(symbol, data);
+    }
+
+    /// Signals an error with the supplied Emacs error arguments using an interned symbol.
     pub fn signal(self: Env, err: anyerror, args: anytype) FuncallError!void {
         const ArgsType = @TypeOf(args);
         const args_type_info = @typeInfo(ArgsType);
@@ -860,12 +1237,12 @@ pub const Env = struct {
             @compileError("expected tuple or struct argument, found " ++ @typeName(ArgsType));
         }
 
-        var data: [args_type_info.@"struct".field_names.len]Value = undefined;
-        inline for (args_type_info.@"struct".field_names, 0..) |field_name, i| {
+        const field_names = args_type_info.@"struct".field_names;
+        var data: [field_names.len]Value = undefined;
+        inline for (field_names, 0..) |field_name, i| {
             data[i] = @field(args, field_name);
         }
-        var symbol_args = [_]Value{self.makeString(@errorName(err))};
-        const symbol = try self.funcall("make-symbol", &symbol_args);
+        const symbol = try self.internSlice(@errorName(err));
         const signal_data = try self.funcall("list", &data);
         self.nonLocalExitSignal(symbol, signal_data);
     }
@@ -967,3 +1344,13 @@ pub const Env = struct {
         self.inner.make_interactive.?(self.inner, function, spec);
     }
 };
+
+test "Channel std.Io adapters compile" {
+    const ch = Channel{ .file_descriptor = -1 };
+    const file = ch.toFile();
+    try std.testing.expectEqual(@as(std.posix.fd_t, -1), file.handle);
+
+    var buf: [64]u8 = undefined;
+    const adapter = ch.writer(&buf);
+    try std.testing.expect(@TypeOf(adapter.writer) == std.Io.Writer);
+}

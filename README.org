@@ -1,6 +1,6 @@
 #+TITLE: Zig-emacs
 #+DATE: 2023-12-24T12:27:53+0800
-#+LASTMOD: 2026-11-14T11:50:30+0800
+#+LASTMOD: 2026-11-15T10:47:00+0800
 #+OPTIONS: toc:nil num:nil
 
 [[https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml][https://github.com/jiacai2050/zig-emacs/actions/workflows/ci.yml/badge.svg]]
@@ -12,8 +12,11 @@
 * Features
 
 - *Zero Header Setup*: Automatically translates bundled ~include/emacs-module.h~ via Zig's ~addTranslateC~ during build.
+- *Ergonomic Function Signatures*: Functions accept native Zig scalar types (~i64~, ~bool~, ~f64~, ~?T~) with automatic argument unpacking, type checking (~wrong-type-argument~), and auto-converted return values.
+- *Struct & Plist/Alist Serialization*: Seamless bidirectional mapping between Zig structs and Elisp property lists / association lists via ~fromPlist~ (with default field value support) and ~makePlist~/~makeAlist~.
 - *Type-safe User Pointers*: Wrap arbitrary Zig structs with typed helpers and automatic finalizers tied to Emacs GC.
-- *Non-blocking Async Streaming*: Send streaming data from native background threads directly into Emacs ~make-pipe-process~ via ~openChannel~ without blocking the editor UI.
+- *Non-blocking Async Streaming & IO*: Stream native results via ~openChannel~, with zero-allocation ~channel.print(...)~ and standard Zig 0.17 ~std.Io.Writer~ integration.
+- *Scoped Arena Memory Management*: Lightweight ~env.arena(gpa)~ helper to eliminate tedious manual freeing of temporary allocations.
 - *Idiomatic Error Handling*: Seamless mapping between Zig error unions and Emacs non-local exits (~signal~ and ~throw~).
 
 * Requirements
@@ -45,7 +48,7 @@ module.addImport("emacs", emacs_dep.module("emacs"));
 
 * Quickstart
 
-Every module must call ~moduleInit~ at comptime and provide an ~init~ function. Registered functions accept ~emacs.Env~ as their first argument and return ~emacs.Value~ or ~!emacs.Value~.
+Every module must call ~moduleInit~ at comptime and provide an ~init~ function. Registered functions accept ~emacs.Env~ as their first argument and can declare either raw ~emacs.Value~ or native Zig scalar types:
 
 #+begin_src zig
 const std = @import("std");
@@ -55,10 +58,10 @@ comptime {
     emacs.moduleInit(@This());
 }
 
-fn add(env: emacs.Env, lhs: emacs.Value, rhs: emacs.Value) emacs.Value {
-    return env.makeInteger(
-        env.extractInteger(lhs) + env.extractInteger(rhs),
-    );
+// Functions can declare native Zig types directly!
+// zig-emacs handles automatic unpacking, type checks, and return conversions.
+fn add(_: emacs.Env, lhs: i64, rhs: i64) i64 {
+    return lhs + rhs;
 }
 
 pub fn init(env: emacs.Env) c_int {
@@ -80,14 +83,66 @@ Build the module and load it in Emacs:
 #+begin_src emacs-lisp
 (add-to-list 'load-path "/path/to/zig-emacs/zig-out/lib/")
 (load "libzig-example")
-(zig-add 1 2)
+(zig-add 1 2) ;; => 3
 #+end_src
 
 * Core Guides
 
-** Allocator Context & User Data
+** Ergonomic Function Signatures & Automatic Conversions
 
-Emacs ~Env~ does not manage memory allocators. Pass application state via ~FuncContext.user_data~ and retrieve it with ~getUserData~:
+Functions registered via ~makeFunction~ do not need to deal with low-level ~emacs.Value~ unwrapping. You can declare native Zig types directly, and ~zig-emacs~ will validate arguments, raise standard ~(wrong-type-argument PREDICATE VALUE)~ errors on mismatches, and convert return values:
+
+#+begin_src zig
+// 1. Native arguments and return values (with optional parameters)
+fn calculate(_: emacs.Env, a: i64, b: i64, bonus: ?i64) i64 {
+    return a * 10 + b + (bonus orelse 0);
+}
+
+// 2. Composing Elisp lists and vectors from heterogeneous tuples
+fn buildResponse(env: emacs.Env) !emacs.Value {
+    return env.list(.{
+        @as(i64, 200),
+        "status OK",
+        true,
+    });
+}
+#+end_src
+
+** Plist, Alist & Struct Deserialization
+
+~zig-emacs~ provides reflection-powered serialization between native Zig structs and Elisp property lists / association lists:
+
+#+begin_src zig
+const ServerConfig = struct {
+    host: []const u8 = "localhost",
+    port: i32 = 8080,
+    verbose: bool = false,
+    token: ?[]const u8 = null,
+};
+
+// Deserializing an Elisp plist with default values:
+fn configure(env: emacs.Env, plist_val: emacs.Value) !emacs.Value {
+    var arena = env.arena(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    const config = try env.fromPlist(ServerConfig, plist_val, arena.allocator());
+    // config.host, config.port, etc. are populated with defaults if omitted in plist!
+    return env.boolean(config.verbose);
+}
+
+// Serializing a Zig struct into an Elisp plist or alist:
+fn exportConfig(env: emacs.Env) !emacs.Value {
+    return env.makePlist(.{
+        .name = "my-service",
+        .port = @as(i64, 9090),
+        .active = true,
+    });
+}
+#+end_src
+
+** Allocator Context & Scoped Arena
+
+Emacs ~Env~ does not manage memory allocators. Pass application state via ~FuncContext.user_data~ and use ~env.arena~ for hassle-free temporary memory management:
 
 #+begin_src zig
 const ModuleContext = struct {
@@ -100,8 +155,12 @@ var module_context: ModuleContext = .{
 
 fn greeting(env: emacs.Env, value: emacs.Value) !emacs.Value {
     const context = env.getUserData(ModuleContext) orelse return error.MissingModuleContext;
-    const text = try env.extractString(context.gpa, value);
-    defer context.gpa.free(text);
+
+    // Scoped arena automatically frees all temporary allocations when deinit is called
+    var arena = env.arena(context.gpa);
+    defer arena.deinit();
+
+    const text = try env.extractString(arena.allocator(), value);
     return env.makeString(text);
 }
 
@@ -158,6 +217,7 @@ Convenience wrappers are available:
 - ~env.message(str)~: Print directly to the echo area / ~*Messages*~ buffer.
 - ~env.reportError(prefix, err)~: Call the Emacs ~error~ function.
 - ~env.signal(err, args)~: Raise an Emacs signal from a Zig error.
+- ~env.signalSymbol(symbol_name, data)~: Signal a specific interned error condition.
 
 ** Native Types, Sequences & Object Wrappers
 
@@ -200,7 +260,7 @@ if (handle.getChecked(MyResource.magic)) |res_ptr| {
 handle.deinit(); // sets user-ptr to null
 #+end_src
 
-** Non-blocking Async Streaming
+** Non-blocking Async Streaming & Channel IO
 
 ~openChannel~ binds native code to the write end of an Emacs ~make-pipe-process~. This allows background threads to stream results without locking the main Emacs UI:
 
@@ -214,7 +274,7 @@ handle.deinit(); // sets user-ptr to null
   (zig-start-stream process))
 #+end_src
 
-On the Zig side:
+On the Zig side, ~Channel~ provides zero-allocation stack formatting (~channel.print~) and seamless adaptation to the standard Zig 0.17 ~std.Io.Writer~:
 
 #+begin_src zig
 const Worker = struct {
@@ -225,9 +285,16 @@ const Worker = struct {
             var ch = self.channel;
             ch.deinit() catch {};
         }
-        // Writes run concurrently in a background thread
-        self.channel.write("part 1\n") catch return;
-        self.channel.write("part 2\n") catch return;
+
+        // 1. Zero-allocation stack formatted print
+        self.channel.print("Processed item {d} of {d}\n", .{ 1, 10 }) catch return;
+
+        // 2. Standard Zig 0.17 Writer adapter
+        var buf: [512]u8 = undefined;
+        var adapter = self.channel.writer(&buf);
+        const writer = &adapter.writer;
+        writer.print("Stream payload: {s}\n", .{"ready"}) catch return;
+        writer.flush() catch return;
     }
 };
 

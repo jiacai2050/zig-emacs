@@ -83,4 +83,67 @@
   ;; Non-sequence returns nil
   (should (null (zig-test-sequence 1234))))
 
+(ert-deftest test-plist ()
+  (let ((pl (zig-test-plist)))
+    (should (string-equal "zig-emacs" (plist-get pl :name)))
+    (should (= 17 (plist-get pl :version)))
+    (should (eq t (plist-get pl :active)))))
+
+(ert-deftest test-alist ()
+  (let ((al (zig-test-alist)))
+    (should (string-equal "zig-emacs" (cdr (assoc 'name al))))
+    (should (= 17 (cdr (assoc 'version al))))
+    (should (eq t (cdr (assoc 'active al))))))
+
+(ert-deftest test-optional-args ()
+  (should (= 110 (zig-test-optional 10)))
+  (should (= 35 (zig-test-optional 10 25)))
+  (should-error (zig-test-optional)))
+
+(define-error 'zig-error "Zig module test error")
+
+(ert-deftest test-signal ()
+  (let ((caught nil))
+    (condition-case err
+        (zig-test-signal)
+      (zig-error
+       (setq caught t)
+       (should (equal "test error message" (cdr err)))))
+    (should caught)))
+
+(ert-deftest test-auto-return ()
+  (should (= 42 (zig-test-auto-return 4 2)))
+  (should (= 105 (zig-test-auto-return 10 5))))
+
+(ert-deftest test-auto-list ()
+  (let ((l (zig-test-auto-list)))
+    (should (= 42 (nth 0 l)))
+    (should (string-equal "automatic conversion" (nth 1 l)))
+    (should (eq t (nth 2 l)))))
+
+(ert-deftest test-auto-vector ()
+  (let ((v (zig-test-auto-vector)))
+    (should (= 100 (aref v 0)))
+    (should (string-equal "vector conversion" (aref v 1)))
+    (should (eq nil (aref v 2)))))
+
+(ert-deftest test-native-args ()
+  (should (= 1015 (zig-test-native-args 5 10)))
+  (should (= 65 (zig-test-native-args 5 10 50)))
+  (should-error (zig-test-native-args 5 "invalid")))
+
+(ert-deftest test-from-plist ()
+  ;; Test default values
+  (let ((res1 (zig-test-from-plist (list :token "secret-123"))))
+    (should (string-equal "localhost" (nth 0 res1)))
+    (should (= 8080 (nth 1 res1)))
+    (should (eq nil (nth 2 res1)))
+    (should (string-equal "secret-123" (nth 3 res1))))
+  ;; Test custom values
+  (let ((res2 (zig-test-from-plist (list :host "api.example.com" :port 443 :verbose t))))
+    (should (string-equal "api.example.com" (nth 0 res2)))
+    (should (= 443 (nth 1 res2)))
+    (should (eq t (nth 2 res2)))
+    (should (string-equal "no-token" (nth 3 res2)))))
+
 ;; ert-run-tests-batch

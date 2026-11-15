@@ -11,7 +11,7 @@
     },
     .dependencies = .{
         .sqlite = .{
-            .url = "git+https://github.com/nDimensional/zig-sqlite.git#3530400",
+            .url = "git+https://github.com/nDimensional/zig-sqlite.git#0c79b81d7f93c696261f6949e207c4497551b229",
             .hash = "sqlite-0.5.0-3530400-djiKTsSWAACNHCdrLkfWz3lizwThl8rpAWJIKP90TIeI",
             .lazy = true,
         },
